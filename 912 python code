@@ -1,0 +1,1126 @@
+import tkinter as tk
+from tkinter import ttk, scrolledtext, messagebox, simpledialog
+import re
+from collections import OrderedDict
+# import math # math module was imported but not used directly. re.finditer is fine.
+
+# --- Constants and Helper Data ---
+IUPAC_BASES_REGEX = {
+    'A': 'A', 'C': 'C', 'G': 'G', 'T': 'T', 'U': 'T',
+    'R': '[AG]', 'Y': '[CT]', 'S': '[GC]', 'W': '[AT]', 'K': '[GT]', 'M': '[AC]',
+    'B': '[CGT]', 'D': '[AGT]', 'H': '[ACT]', 'V': '[ACG]',
+    'N': '[ACGTU]'
+}
+COMPLEMENT_DNA = {
+    'A': 'T', 'T': 'A', 'U': 'A', 'C': 'G', 'G': 'C',
+    'R': 'Y', 'Y': 'R', 'S': 'S', 'W': 'W', 'K': 'M', 'M': 'K',
+    'B': 'V', 'V': 'B', 'D': 'H', 'H': 'D', 'N': 'N'
+}
+
+COLOR_PALETTE_PAM_DEF = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"]
+SELECTED_PAM_OUTLINE_COLOR = "#FF0000"
+
+# QoL Update Constants
+SELECTED_ARROW_COLOR = "#FF0000"
+SELECTED_CUT_SITE_COLOR = "#FF0000"
+DEFAULT_ARROW_SHAFT_WIDTH_FACTOR = 2.0
+SELECTED_ARROW_SHAFT_WIDTH_FACTOR = 2.8
+DEFAULT_CUT_SITE_WIDTH_FACTOR = 1.5
+SELECTED_CUT_SITE_WIDTH_FACTOR = 2.0
+
+
+# --- Tooltip Class ---
+class ToolTip:
+    def __init__(self, widget, text):
+        self.widget = widget
+        self.text = text
+        self.tooltip_window = None
+        self.widget.bind("<Enter>", self.show_tooltip)
+        self.widget.bind("<Leave>", self.hide_tooltip)
+
+    def show_tooltip(self, event=None):
+        if self.tooltip_window or not self.text:
+            return
+        x, y, _, _ = self.widget.bbox("insert")
+        x += self.widget.winfo_rootx() + 25
+        y += self.widget.winfo_rooty() + 25
+
+        self.tooltip_window = tw = tk.Toplevel(self.widget)
+        tw.wm_overrideredirect(True)
+        tw.wm_geometry(f"+{x}+{y}")
+        label = tk.Label(tw, text=self.text, justify=tk.LEFT,
+                         background="#ffffe0", relief=tk.SOLID, borderwidth=1,
+                         font=("Segoe UI", 8, "normal"), padx=4, pady=2)
+        label.pack(ipadx=1)
+
+    def hide_tooltip(self, event=None):
+        if self.tooltip_window:
+            self.tooltip_window.destroy()
+        self.tooltip_window = None
+
+# --- Main Application Class ---
+class CrisprGuideFinderApp(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("CRISPR Guide Finder & Visualizer")
+        self.geometry("1700x1050")
+
+        self.pam_definitions_ui = []
+        self.current_pam_color_index = 0
+        self.dna_sequence_cleaned = ""
+        self.dna_start_offset = 0
+        self.found_guides_data_master = []
+        self.hidden_guide_indices = set()
+        self.selected_master_indices = set()
+
+        self.viz_char_width_base = 14
+        self.viz_base_gap_pixels = 3
+        self.viz_char_height_base = 18
+        self.viz_padding = 30
+        # self.viz_dna_area_height = self.viz_char_height_base # Not directly used after vd calc
+        # self.viz_index_area_height = 28 # Not directly used after vd calc
+        # self.viz_pam_arrow_area_height = 20 # Not directly used after vd calc
+        # self.viz_guide_lane_height = self.viz_char_height_base + 10 # Not directly used after vd calc
+        self.viz_max_guide_lanes = 5
+        self.viz_zoom_level = 1.0
+        self._drag_scan_mark_x = 0
+        self.details_text_font_size = 9
+
+        # Cache for _get_viz_fonts_and_dims
+        self._cached_viz_dims_zoom = None
+        self._cached_viz_dims = None
+
+        self._setup_styles()
+        self._setup_ui()
+        self._create_context_menus()
+
+    def _get_visible_in_viz_guides_data(self):
+        # Using list comprehension is Pythonic and efficient here
+        return [guide for i, guide in enumerate(self.found_guides_data_master) if i not in self.hidden_guide_indices]
+
+    def _setup_styles(self):
+        s = ttk.Style()
+        s.theme_use('clam')
+        s.configure('Accent.TButton', font=('Segoe UI', 10, 'bold'), foreground='white', padding=6)
+        s.map('Accent.TButton', background=[('active', '#005A9E'), ('!active', '#0078D4')])
+        s.configure('Red.TButton', font=('Segoe UI', 8), foreground='white')
+        s.map('Red.TButton', background=[('active', '#A50000'), ('!active', '#D00000')])
+        s.configure("Treeview.Heading", font=('Segoe UI', 9, 'bold'))
+        s.configure("Treeview", rowheight=24, font=('Segoe UI', 9))
+        s.configure("TLabelframe.Label", font=('Segoe UI', 10, 'bold'))
+        s.configure("TLabel", font=('Segoe UI', 9))
+        s.configure("Info.TLabel", font=('Segoe UI', 9, 'bold'), foreground='blue')
+        s.configure("TEntry", font=('Segoe UI', 9), padding=3)
+        s.configure("TRadiobutton", font=('Segoe UI', 9))
+        s.configure("TCheckbutton", font=('Segoe UI', 9))
+
+    def _create_info_label(self, parent, text):
+        info_label = ttk.Label(parent, text="(?)", style="Info.TLabel", cursor="hand2")
+        ToolTip(info_label, text)
+        return info_label
+
+    def _get_next_pam_color(self):
+        color = COLOR_PALETTE_PAM_DEF[self.current_pam_color_index % len(COLOR_PALETTE_PAM_DEF)]
+        self.current_pam_color_index += 1
+        return color
+
+    def _setup_ui(self):
+        top_frame = ttk.Frame(self, padding=5)
+        top_frame.pack(fill=tk.BOTH, expand=False, side=tk.TOP)
+        bottom_frame = ttk.Frame(self, padding=(5,0,5,5))
+        bottom_frame.pack(fill=tk.BOTH, expand=True, side=tk.BOTTOM)
+        top_paned_window = ttk.PanedWindow(top_frame, orient=tk.HORIZONTAL)
+        top_paned_window.pack(fill=tk.BOTH, expand=True)
+
+        left_pane_content = ttk.Frame(top_paned_window)
+        top_paned_window.add(left_pane_content, weight=1)
+
+        input_frame = ttk.LabelFrame(left_pane_content, text="Input Parameters", padding=10)
+        input_frame.pack(fill=tk.X, expand=False, pady=(0,5))
+
+        dna_label_frame = ttk.Frame(input_frame)
+        dna_label_frame.grid(row=0, column=0, columnspan=4, sticky=tk.W, pady=(0,2))
+        ttk.Label(dna_label_frame, text="DNA Sequence (5'-3'):").pack(side=tk.LEFT)
+        self._create_info_label(dna_label_frame, "Paste your DNA sequence. Use [0] to explicitly mark index 0 (e.g., ACG[0]T). Otherwise, first base is 0.").pack(side=tk.LEFT, padx=3)
+        self.dna_sequence_text = scrolledtext.ScrolledText(input_frame, height=8, width=60, wrap=tk.WORD, relief=tk.SOLID, borderwidth=1, font=("Courier New", 10))
+        self.dna_sequence_text.grid(row=1, column=0, columnspan=4, sticky="ew", pady=2)
+        self.dna_sequence_text.insert(tk.END, "ATTTCTGCTGCAAGTAAGCATGCATTTGTAGGCTTGATGCTTTTTTTCTGCTTCTCCAGCCCTGGCCTGGGTCAATCCTTGGGGCCCAGACTGAGCACG[0]TGATGGCAGAGGAAAGGAAGCCCTGCTTCCTCCAGAGGGCGTCGCAGGACAGCTTTTCCTAGACAGGGGCTAGTATGTGCAGCTCCTGCACCGGGATACTGGTTGACAAGTTTGGCGTGGC")
+
+
+        pam_header_frame = ttk.Frame(input_frame)
+        pam_header_frame.grid(row=2, column=0, columnspan=4, sticky=tk.W, pady=(8,0))
+        ttk.Label(pam_header_frame, text="PAM Definitions:").pack(side=tk.LEFT)
+        self.add_pam_button = ttk.Button(pam_header_frame, text="Add PAM", command=self._add_pam_row)
+        self.add_pam_button.pack(side=tk.LEFT, padx=5)
+
+        self.pam_rows_frame = ttk.Frame(input_frame)
+        self.pam_rows_frame.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(0,8))
+        self._add_pam_row(is_initial=True)
+
+        self.find_guides_button = ttk.Button(input_frame, text="Find Guides & Visualize", command=self._on_find_guides, style="Accent.TButton")
+        self.find_guides_button.grid(row=4, column=0, columnspan=4, pady=8, ipady=5, sticky="ew")
+
+        details_outer_frame = ttk.LabelFrame(left_pane_content, text="Selection Details", padding=10)
+        details_outer_frame.pack(fill=tk.BOTH, expand=True, pady=(5,0))
+        
+        details_zoom_frame = ttk.Frame(details_outer_frame)
+        details_zoom_frame.pack(fill=tk.X, pady=(0,3))
+        ttk.Label(details_zoom_frame, text="Text Size:").pack(side=tk.LEFT)
+        ttk.Button(details_zoom_frame, text="+", command=self._zoom_details_text_in, width=2).pack(side=tk.LEFT, padx=2)
+        ttk.Button(details_zoom_frame, text="-", command=self._zoom_details_text_out, width=2).pack(side=tk.LEFT, padx=2)
+
+        self.details_text_area = scrolledtext.ScrolledText(details_outer_frame, height=8, width=50, wrap=tk.WORD, state=tk.DISABLED, relief=tk.SOLID, borderwidth=1)
+        self.details_text_area.pack(fill=tk.BOTH, expand=True)
+        self.details_text_area.tag_configure("underline", underline=True)
+        self._update_details_font()
+
+        results_outer_frame = ttk.Frame(top_paned_window, padding=(5,10,10,10))
+        top_paned_window.add(results_outer_frame, weight=2)
+        results_frame = ttk.LabelFrame(results_outer_frame, text="Found Guides", padding=10)
+        results_frame.pack(fill=tk.BOTH, expand=True)
+        
+        columns = ("visible_viz", "pam_seq", "guide_seq", "pam_type", "strand", "pam_location", "cut_site", "guide_len")
+        self.results_table = ttk.Treeview(results_frame, columns=columns, show="headings")
+        col_widths = {"visible_viz": 60, "pam_seq": 70, "guide_seq": 180, "pam_type": 180, 
+                      "strand": 50, "pam_location": 100, "cut_site": 110, "guide_len": 60}
+        col_names = {"visible_viz": "Visible", "pam_seq": "PAM", "guide_seq": "Guide (5'-3')", "pam_type": "PAM Type", 
+                     "strand": "Strand", "pam_location": "PAM Location", "cut_site": "Cut Site (3' base)", "guide_len": "Guide Len"}
+        
+        for col_id in columns:
+            self.results_table.heading(col_id, text=col_names[col_id], command=lambda c=col_id: self._sort_table_column(c, False))
+            self.results_table.column(col_id, width=col_widths[col_id], minwidth=max(40, col_widths[col_id]//2), anchor=tk.W, stretch=tk.YES)
+        
+        table_sb_y = ttk.Scrollbar(results_frame, orient=tk.VERTICAL, command=self.results_table.yview)
+        self.results_table.configure(yscrollcommand=table_sb_y.set)
+        table_sb_x = ttk.Scrollbar(results_frame, orient=tk.HORIZONTAL, command=self.results_table.xview)
+        self.results_table.configure(xscrollcommand=table_sb_x.set)
+        table_sb_y.pack(side=tk.RIGHT, fill=tk.Y)
+        table_sb_x.pack(side=tk.BOTTOM, fill=tk.X)
+        self.results_table.pack(fill=tk.BOTH, expand=True)
+        self.results_table.bind("<<TreeviewSelect>>", self._on_table_row_select)
+        self.results_table.bind("<Button-3>", self._show_table_context_menu)
+
+        viz_outer_frame = ttk.LabelFrame(bottom_frame, text="Sequence Visualization", padding=10)
+        viz_outer_frame.pack(fill=tk.BOTH, expand=True)
+        viz_controls_frame = ttk.Frame(viz_outer_frame)
+        viz_controls_frame.pack(fill=tk.X, pady=(0,5))
+        ttk.Label(viz_controls_frame, text="Zoom:").pack(side=tk.LEFT, padx=(0,2))
+        ttk.Button(viz_controls_frame, text="+", command=self._zoom_in_viz, width=3).pack(side=tk.LEFT)
+        ttk.Button(viz_controls_frame, text="-", command=self._zoom_out_viz, width=3).pack(side=tk.LEFT, padx=(2,10))
+        self.viz_mode_pams_var = tk.BooleanVar(value=True)
+        self.viz_mode_cuts_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(viz_controls_frame, text="Show PAMs & Arrows", variable=self.viz_mode_pams_var, command=self._on_viz_mode_change).pack(side=tk.LEFT, padx=3)
+        ttk.Checkbutton(viz_controls_frame, text="Show Cut Sites", variable=self.viz_mode_cuts_var, command=self._on_viz_mode_change).pack(side=tk.LEFT, padx=3)
+        ttk.Button(viz_controls_frame, text="Clear Selections", command=self._clear_all_selections).pack(side=tk.LEFT, padx=(10, 3))
+        ttk.Button(viz_controls_frame, text="Reset View", command=self._reset_viz_view).pack(side=tk.LEFT, padx=3)
+        ttk.Button(viz_controls_frame, text="Show All in Viz", command=self._unhide_all_guides_in_viz).pack(side=tk.LEFT, padx=3)
+        
+        self.viz_canvas = tk.Canvas(viz_outer_frame, bg="#FFFFFF", highlightthickness=0)
+        self.viz_canvas.pack(fill=tk.BOTH, expand=True, pady=5)
+        viz_sb_x = ttk.Scrollbar(viz_outer_frame, orient=tk.HORIZONTAL, command=self.viz_canvas.xview)
+        self.viz_canvas.configure(xscrollcommand=viz_sb_x.set)
+        viz_sb_x.pack(fill=tk.X, side=tk.BOTTOM)
+        self.viz_canvas.bind("<Button-1>", self._on_canvas_click)
+        self.viz_canvas.bind("<Shift-Button-1>", self._on_canvas_shift_click)
+        self.viz_canvas.bind("<MouseWheel>", self._on_mouse_wheel_zoom)
+        self.viz_canvas.bind("<Button-4>", self._on_mouse_wheel_zoom)
+        self.viz_canvas.bind("<Button-5>", self._on_mouse_wheel_zoom)
+        self.viz_canvas.bind("<ButtonPress-3>", self._on_canvas_drag_start)
+        self.viz_canvas.bind("<B3-Motion>", self._on_canvas_drag_motion)
+        self.viz_canvas.bind("<ButtonRelease-3>", self._on_canvas_drag_end)
+
+    def _add_pam_row(self, is_initial=False):
+        row_frame = ttk.Frame(self.pam_rows_frame)
+        row_frame.pack(fill=tk.X, pady=3, padx=2)
+        pam_color = self._get_next_pam_color()
+        tk.Label(row_frame, text="■", fg=pam_color, font=('Segoe UI', 12, 'bold')).pack(side=tk.LEFT, padx=(0,3))
+
+        pam_seq_frame = ttk.Frame(row_frame)
+        pam_seq_frame.pack(side=tk.LEFT, padx=(0,5))
+        ttk.Label(pam_seq_frame, text="PAM:").pack(side=tk.LEFT, padx=(0,1))
+        pam_seq_entry = ttk.Entry(pam_seq_frame, width=10)
+        pam_seq_entry.pack(side=tk.LEFT)
+        self._create_info_label(pam_seq_frame, "PAM sequence (e.g., NGG, TTTN). Use IUPAC codes.").pack(side=tk.LEFT, padx=(1,0))
+        
+        orientation_var = tk.StringVar(value="3'")
+        rb_5 = ttk.Radiobutton(row_frame, text="5'", variable=orientation_var, value="5'")
+        rb_5.pack(side=tk.LEFT, padx=(0,1))
+        rb_3 = ttk.Radiobutton(row_frame, text="3'", variable=orientation_var, value="3'")
+        rb_3.pack(side=tk.LEFT, padx=(0,1))
+        self._create_info_label(row_frame, "PAM Orientation relative to its guide:\n5': PAM-[Guide]\n3': [Guide]-PAM").pack(side=tk.LEFT, padx=(0,5))
+
+        ttk.Label(row_frame, text="Len:").pack(side=tk.LEFT, padx=(0,1))
+        guide_len_var = tk.StringVar(value="20")
+        guide_len_entry = ttk.Entry(row_frame, textvariable=guide_len_var, width=3)
+        guide_len_entry.pack(side=tk.LEFT, padx=(0,1))
+        self._create_info_label(row_frame, "Guide RNA length (bp).").pack(side=tk.LEFT, padx=(0,5))
+
+        ttk.Label(row_frame, text="Offset:").pack(side=tk.LEFT, padx=(0,1))
+        cut_offset_var = tk.StringVar(value="3") 
+        cut_offset_entry = ttk.Entry(row_frame, textvariable=cut_offset_var, width=3)
+        cut_offset_entry.pack(side=tk.LEFT, padx=(0,1))
+        self._create_info_label(row_frame,
+            "Offset (0 to GuideLength): Number of bases on the guide strand\n"
+            "between the PAM-proximal end of the guide and the cleavage site.\n"
+            "The cut occurs *after* the (Offset-1)-th base for 5' PAMs, or\n"
+            "after the (Length - Offset - 1)-th base for 3' PAMs (0-indexed guide).\n\n"
+            "Interpretation:\n"
+            "- Offset = 0: Cut is immediately adjacent to the PAM-proximal end of the guide.\n"
+            "  - 5' PAM (PAM-[G0G1...]): Cut is PAM-^G0G1...\n"
+            "  - 3' PAM ([...G(L-2)G(L-1)]-PAM): Cut is ...G(L-2)G(L-1)^-PAM\n"
+            "- Offset = X: There are X bases between the PAM and the cut site.\n\n"
+            "Example: SpCas9 (NGG, 3' PAM, 20mer guide)\n"
+            "  Typically cuts 3bp upstream of PAM: ...N N N^N N N - N G G\n"
+            "  The 3 bases NNN are between cut and PAM. So, Offset = 3.\n"
+            "  Cut is after Guide[20-3-1] = Guide[16]."
+        ).pack(side=tk.LEFT, padx=(0,5))
+        
+        remove_button = ttk.Button(row_frame, text="Remove", style="Red.TButton", command=lambda rf=row_frame: self._remove_pam_row(rf), width=8)
+        remove_button.pack(side=tk.LEFT, padx=3)
+
+        if is_initial: 
+            pam_seq_entry.insert(0, "NGG")
+            rb_3.invoke()
+
+        self.pam_definitions_ui.append({
+            "frame": row_frame, "seq_entry": pam_seq_entry, "orientation_var": orientation_var,
+            "guide_len_var": guide_len_var, "cut_offset_var": cut_offset_var,
+            "color": pam_color
+        })
+
+    def _remove_pam_row(self, row_frame_to_remove):
+        if len(self.pam_definitions_ui) <= 1:
+            messagebox.showwarning("Action Denied", "At least one PAM definition must remain.")
+            return
+        # Find and remove the definition
+        self.pam_definitions_ui = [pam_def for pam_def in self.pam_definitions_ui if pam_def["frame"] != row_frame_to_remove]
+        row_frame_to_remove.destroy()
+
+
+    def _on_find_guides(self):
+        raw_dna_seq = self.dna_sequence_text.get("1.0", tk.END).strip()
+        if not raw_dna_seq: return messagebox.showerror("Input Error", "DNA sequence cannot be empty.")
+        try:
+            self.dna_sequence_cleaned, self.dna_start_offset = preprocess_dna_sequence(raw_dna_seq)
+        except ValueError as e: return messagebox.showerror("Input Error", f"Error processing DNA sequence: {e}")
+        if not self.dna_sequence_cleaned: return messagebox.showerror("Input Error", "No valid DNA characters found.")
+
+        user_pams_data = []
+        valid_iupac_chars = set(IUPAC_BASES_REGEX.keys())
+        for pam_def_ui in self.pam_definitions_ui:
+            pam_seq = pam_def_ui["seq_entry"].get().strip().upper()
+            if not pam_seq or not all(c in valid_iupac_chars for c in pam_seq):
+                 return messagebox.showerror("Input Error", f"Invalid PAM: '{pam_seq}'. Use A,C,G,T,U or IUPAC.")
+            try:
+                guide_len = int(pam_def_ui["guide_len_var"].get())
+                num_bases_pam_to_cut = int(pam_def_ui["cut_offset_var"].get()) 
+                if not (guide_len > 0 and 0 <= num_bases_pam_to_cut <= guide_len):
+                    raise ValueError("Offset must be between 0 and guide length (inclusive).")
+            except ValueError as e:
+                return messagebox.showerror("Input Error", f"Invalid guide length or cut offset for PAM '{pam_seq}'. {e}")
+            
+            user_pams_data.append({
+                "sequence": pam_seq, "orientation": pam_def_ui["orientation_var"].get(),
+                "guide_length": guide_len, 
+                "num_bases_pam_to_cut": num_bases_pam_to_cut,
+                "color": pam_def_ui["color"]
+            })
+        if not user_pams_data: return messagebox.showerror("Input Error", "At least one PAM definition required.")
+
+        self.found_guides_data_master = self._perform_search_overlapping(self.dna_sequence_cleaned, self.dna_start_offset, user_pams_data)
+        self.hidden_guide_indices.clear()
+        self.selected_master_indices.clear()
+        
+        self._update_results_table()
+        self._redraw_static_visualization() # This will call _update_dynamic_visuals_for_selection
+        self._update_details_pane()
+
+        if not self.found_guides_data_master:
+            messagebox.showinfo("No Results", "No guide RNAs found for the given criteria.")
+        elif not self._get_visible_in_viz_guides_data():
+             messagebox.showinfo("Results Note", "All found guides are currently hidden in the visualization.")
+
+
+    def _perform_search_overlapping(self, dna_seq_str, start_offset_val, user_pams_list):
+        results = []
+        dna_len = len(dna_seq_str)
+
+        for pam_info in user_pams_list:
+            orig_pam_s = pam_info["sequence"]
+            orig_pam_o = pam_info["orientation"] 
+            guide_len_val = pam_info["guide_length"]
+            num_bases_pam_to_cut = pam_info["num_bases_pam_to_cut"]
+            pam_color_val = pam_info["color"]
+
+            pam_regex_fwd_str_exact = iupac_to_regex(orig_pam_s)
+            # Use lookahead to find overlapping matches for the PAM itself
+            pam_regex_fwd_lookahead = f"(?={pam_regex_fwd_str_exact})"
+            
+            for match_fwd in re.finditer(pam_regex_fwd_lookahead, dna_seq_str, re.IGNORECASE):
+                pam_m_start_idx = match_fwd.start() # Start of the actual PAM sequence
+                # Ensure the full PAM fits and re-verify with fullmatch (important for complex IUPAC in lookahead)
+                if pam_m_start_idx + len(orig_pam_s) > dna_len: continue
+                current_segment = dna_seq_str[pam_m_start_idx : pam_m_start_idx + len(orig_pam_s)]
+                if not re.fullmatch(pam_regex_fwd_str_exact, current_segment, re.IGNORECASE):
+                    continue # Should be rare if regex is well-formed, but good safeguard
+
+                pam_m_seq = current_segment 
+                pam_m_end_idx = pam_m_start_idx + len(pam_m_seq) # Exclusive end on dna_seq_str
+                guide_s, cut_site_on_str, guide_start_on_str, guide_end_on_str = "", -1, -1, -1
+                
+                pam_actual_match_s_idx_dna = pam_m_start_idx + start_offset_val
+                pam_actual_match_e_idx_dna = pam_m_end_idx - 1 + start_offset_val # Inclusive end
+                
+                pam_reported_loc_idx_dna = pam_actual_match_s_idx_dna if orig_pam_o == "5'" else pam_actual_match_e_idx_dna
+
+                if orig_pam_o == "5'": 
+                    guide_start_on_str = pam_m_end_idx
+                    guide_end_on_str = guide_start_on_str + guide_len_val
+                    if guide_end_on_str <= dna_len:
+                        guide_s = dna_seq_str[guide_start_on_str:guide_end_on_str]
+                        cut_site_on_str = guide_start_on_str + (num_bases_pam_to_cut - 1)
+                elif orig_pam_o == "3'": 
+                    guide_end_on_str = pam_m_start_idx
+                    guide_start_on_str = guide_end_on_str - guide_len_val
+                    if guide_start_on_str >= 0:
+                        guide_s = dna_seq_str[guide_start_on_str:guide_end_on_str]
+                        cut_site_on_str = guide_start_on_str + (guide_len_val - num_bases_pam_to_cut - 1)
+                
+                if guide_s and -1 <= cut_site_on_str < dna_len: 
+                    item_data = {
+                        "pam_sequence_found": pam_m_seq, "guide_sequence": guide_s,
+                        "pam_definition_seq": orig_pam_s, "pam_definition_orientation": orig_pam_o,
+                        "strand": "+", "color": pam_color_val,
+                        "pam_actual_match_start_on_dna": pam_actual_match_s_idx_dna,
+                        "pam_actual_match_end_on_dna": pam_actual_match_e_idx_dna,
+                        "pam_reported_location_on_dna": pam_reported_loc_idx_dna,
+                        "cut_site_index_dna": cut_site_on_str + start_offset_val,
+                        "pam_type_display": f"{orig_pam_s} ({orig_pam_o})",
+                        "guide_start_on_input_strand_abs": guide_start_on_str + start_offset_val,
+                        "guide_end_on_input_strand_abs": guide_end_on_str - 1 + start_offset_val,
+                        "guide_len_used": guide_len_val
+                    }
+                    # Add pre-calculated relative string indices
+                    item_data["pam_s_str_idx"] = item_data["pam_actual_match_start_on_dna"] - start_offset_val
+                    item_data["pam_e_str_idx"] = item_data["pam_actual_match_end_on_dna"] - start_offset_val
+                    item_data["guide_s_str_idx"] = item_data["guide_start_on_input_strand_abs"] - start_offset_val
+                    item_data["guide_e_str_idx"] = item_data["guide_end_on_input_strand_abs"] - start_offset_val
+                    item_data["cut_site_str_idx"] = item_data["cut_site_index_dna"] - start_offset_val
+                    results.append(item_data)
+
+
+            rc_pam_s = get_reverse_complement(orig_pam_s)
+            pam_regex_rev_str_exact = iupac_to_regex(rc_pam_s)
+            pam_regex_rev_lookahead = f"(?={pam_regex_rev_str_exact})"
+
+            for match_rc in re.finditer(pam_regex_rev_lookahead, dna_seq_str, re.IGNORECASE):
+                rc_pam_m_start_idx = match_rc.start()
+                if rc_pam_m_start_idx + len(rc_pam_s) > dna_len: continue
+                current_segment_rc = dna_seq_str[rc_pam_m_start_idx : rc_pam_m_start_idx + len(rc_pam_s)]
+                if not re.fullmatch(pam_regex_rev_str_exact, current_segment_rc, re.IGNORECASE):
+                    continue
+                
+                rc_pam_m_seq = current_segment_rc
+                rc_pam_m_end_idx = rc_pam_m_start_idx + len(rc_pam_m_seq)
+                guide_s_rc, cut_site_on_str_rc, guide_start_on_str_rc, guide_end_on_str_rc = "", -1, -1, -1
+                
+                rc_pam_actual_match_s_idx_dna = rc_pam_m_start_idx + start_offset_val
+                rc_pam_actual_match_e_idx_dna = rc_pam_m_end_idx - 1 + start_offset_val
+
+                pam_reported_loc_idx_rc_dna = rc_pam_actual_match_s_idx_dna if orig_pam_o == "3'" else rc_pam_actual_match_e_idx_dna
+                
+                effective_orientation_for_rc = "3'" if orig_pam_o == "5'" else "5'"
+                if effective_orientation_for_rc == "5'": 
+                    guide_start_on_str_rc = rc_pam_m_end_idx
+                    guide_end_on_str_rc = guide_start_on_str_rc + guide_len_val
+                    if guide_end_on_str_rc <= dna_len:
+                        guide_s_rc = dna_seq_str[guide_start_on_str_rc:guide_end_on_str_rc]
+                        cut_site_on_str_rc = guide_start_on_str_rc + (num_bases_pam_to_cut - 1)
+                elif effective_orientation_for_rc == "3'": 
+                    guide_end_on_str_rc = rc_pam_m_start_idx
+                    guide_start_on_str_rc = guide_end_on_str_rc - guide_len_val
+                    if guide_start_on_str_rc >= 0:
+                        guide_s_rc = dna_seq_str[guide_start_on_str_rc:guide_end_on_str_rc]
+                        cut_site_on_str_rc = guide_start_on_str_rc + (guide_len_val - num_bases_pam_to_cut - 1)
+                
+                if guide_s_rc and -1 <= cut_site_on_str_rc < dna_len:
+                    item_data = {
+                        "pam_sequence_found": rc_pam_m_seq, "guide_sequence": guide_s_rc,
+                        "pam_definition_seq": orig_pam_s, "pam_definition_orientation": orig_pam_o,
+                        "strand": "-", "color": pam_color_val,
+                        "pam_actual_match_start_on_dna": rc_pam_actual_match_s_idx_dna,
+                        "pam_actual_match_end_on_dna": rc_pam_actual_match_e_idx_dna,
+                        "pam_reported_location_on_dna": pam_reported_loc_idx_rc_dna,
+                        "cut_site_index_dna": cut_site_on_str_rc + start_offset_val,
+                        "pam_type_display": f"{rc_pam_m_seq} (rev-comp {orig_pam_s} {orig_pam_o})",
+                        "guide_start_on_input_strand_abs": guide_start_on_str_rc + start_offset_val,
+                        "guide_end_on_input_strand_abs": guide_end_on_str_rc - 1 + start_offset_val,
+                        "guide_len_used": guide_len_val
+                    }
+                    item_data["pam_s_str_idx"] = item_data["pam_actual_match_start_on_dna"] - start_offset_val
+                    item_data["pam_e_str_idx"] = item_data["pam_actual_match_end_on_dna"] - start_offset_val
+                    item_data["guide_s_str_idx"] = item_data["guide_start_on_input_strand_abs"] - start_offset_val
+                    item_data["guide_e_str_idx"] = item_data["guide_end_on_input_strand_abs"] - start_offset_val
+                    item_data["cut_site_str_idx"] = item_data["cut_site_index_dna"] - start_offset_val
+                    results.append(item_data)
+
+        return sorted(results, key=lambda x: x["pam_actual_match_start_on_dna"])
+
+    def _update_results_table(self):
+        for i in self.results_table.get_children(): self.results_table.delete(i)
+        for master_idx, item in enumerate(self.found_guides_data_master):
+            is_visible_in_viz = "Yes" if master_idx not in self.hidden_guide_indices else "No"
+            reported_cut_site = item["cut_site_index_dna"] + 1
+            self.results_table.insert("", tk.END, iid=str(master_idx), values=(
+                is_visible_in_viz,
+                item["pam_sequence_found"], item["guide_sequence"], item["pam_type_display"],
+                item["strand"], item["pam_reported_location_on_dna"],
+                reported_cut_site, 
+                item["guide_len_used"]
+            ))
+
+    def _update_table_visibility_column(self):
+        for master_idx_str in self.results_table.get_children():
+            try:
+                master_idx = int(master_idx_str)
+                is_visible_in_viz = "Yes" if master_idx not in self.hidden_guide_indices else "No"
+                self.results_table.set(master_idx_str, "visible_viz", is_visible_in_viz)
+            except ValueError: # Should not happen if iids are integers
+                continue
+
+    def _sort_table_column(self, col, reverse):
+        # Treeview.set returns string, convert to appropriate type for sorting
+        def sort_key(item_tuple):
+            val_str = item_tuple[0]
+            if col in ["pam_location", "cut_site", "guide_len"]:
+                try: return float(val_str)
+                except ValueError: return val_str.lower() # Fallback for non-numeric
+            return val_str.lower()
+
+        data_list = [(self.results_table.set(child_iid_str, col), child_iid_str)
+                     for child_iid_str in self.results_table.get_children('')]
+        
+        data_list.sort(key=sort_key, reverse=reverse)
+
+        for index, (_, child) in enumerate(data_list):
+            self.results_table.move(child, '', index)
+        self.results_table.heading(col, command=lambda c=col: self._sort_table_column(c, not reverse))
+
+
+    def _on_table_row_select(self, event=None):
+        selected_table_iids = self.results_table.selection()
+        self.selected_master_indices.clear()
+        for iid_str in selected_table_iids:
+            try:
+                self.selected_master_indices.add(int(iid_str))
+            except ValueError: pass # Should not happen
+        self._update_dynamic_visuals_for_selection()
+        self._update_details_pane()
+
+    def _update_details_font(self):
+        font_tuple = ("Segoe UI", self.details_text_font_size)
+        self.details_text_area.config(font=font_tuple)
+
+    def _zoom_details_text_in(self):
+        self.details_text_font_size = min(20, self.details_text_font_size + 1)
+        self._update_details_font()
+    
+    def _zoom_details_text_out(self):
+        self.details_text_font_size = max(6, self.details_text_font_size - 1)
+        self._update_details_font()
+
+    def _update_details_pane(self):
+        self.details_text_area.config(state=tk.NORMAL)
+        self.details_text_area.delete("1.0", tk.END)
+        if not self.selected_master_indices:
+            self.details_text_area.insert(tk.END, "No PAM/Guide selected.")
+        else:
+            # Details for the first selected item (in master list order)
+            primary_master_idx = sorted(list(self.selected_master_indices))[0] 
+            try:
+                if 0 <= primary_master_idx < len(self.found_guides_data_master):
+                    guide_data = self.found_guides_data_master[primary_master_idx]
+                    details_text_area = self.details_text_area # Local alias
+                    
+                    details_text_area.insert(tk.END, "PAM Definition: ")
+                    details_text_area.insert(tk.END, f"{guide_data['pam_definition_seq']} ({guide_data['pam_definition_orientation']})\n")
+                    details_text_area.insert(tk.END, "Found PAM: ")
+                    pam_start_mark = "pam_display_start"; pam_end_mark = "pam_display_end"
+                    details_text_area.mark_set(pam_start_mark, tk.END)
+                    details_text_area.insert(tk.END, guide_data['pam_sequence_found'])
+                    details_text_area.mark_set(pam_end_mark, tk.END)
+                    details_text_area.tag_add("underline", pam_start_mark, pam_end_mark)
+                    details_text_area.mark_unset(pam_start_mark, pam_end_mark)
+                    details_text_area.insert(tk.END, f" (on {'Forward (+)' if guide_data['strand'] == '+' else 'Reverse (-)'} strand)\n")
+                    
+                    details_text_area.insert(tk.END, f"PAM Location Index (0-based): {guide_data['pam_reported_location_on_dna']}\n")
+                    details_text_area.insert(tk.END, f"PAM Matched Region on DNA (0-based): Start {guide_data['pam_actual_match_start_on_dna']}, End {guide_data['pam_actual_match_end_on_dna']}\n\n")
+                    
+                    details_text_area.insert(tk.END, f"Guide Sequence ({guide_data['guide_len_used']}bp):\n{guide_data['guide_sequence']}\n")
+                    details_text_area.insert(tk.END, f"Guide Start (on input, 0-based): {guide_data['guide_start_on_input_strand_abs']}\n")
+                    details_text_area.insert(tk.END, f"Guide End (on input, 0-based): {guide_data['guide_end_on_input_strand_abs']}\n\n")
+
+                    cut_site_5_prime_idx = guide_data['cut_site_index_dna']
+                    cut_site_3_prime_idx = cut_site_5_prime_idx + 1
+                    details_text_area.insert(tk.END, f"Cleavage occurs between index {cut_site_5_prime_idx} and {cut_site_3_prime_idx}.\n")
+                    details_text_area.insert(tk.END, f"Reported Cut Site (base 3' to cleavage): {cut_site_3_prime_idx}\n")
+
+                    if len(self.selected_master_indices) > 1:
+                        details_text_area.insert(tk.END, f"\n--- (+{len(self.selected_master_indices)-1} other items selected) ---")
+            except (ValueError, IndexError, KeyError) as e: # Added KeyError
+                self.details_text_area.insert(tk.END, f"Error retrieving selection details: {e}")
+        self.details_text_area.config(state=tk.DISABLED)
+
+    def _on_viz_mode_change(self):
+        self._redraw_static_visualization() # This will also trigger dynamic update
+
+    def _get_viz_fonts_and_dims(self):
+        # Optimization: Cache results based on zoom level
+        if self._cached_viz_dims_zoom == self.viz_zoom_level and self._cached_viz_dims:
+            return self._cached_viz_dims
+
+        zoom = self.viz_zoom_level # Local alias
+        eff_char_w = (self.viz_char_width_base + self.viz_base_gap_pixels) * zoom
+        base_render_w = self.viz_char_width_base * zoom
+        char_h = self.viz_char_height_base * zoom
+
+        eff_char_w = max(1.0, eff_char_w)
+        base_render_w = max(0.5, base_render_w)
+        char_h = max(5.0, char_h)
+
+        base_font_size = max(6, int(10 * zoom))
+        index_font_size = max(5, int(8 * zoom))
+        
+        # Use fixed base names for these heights as they are part of the calculation logic
+        # rather than being directly used from self.
+        arrow_area_h_base = 20 
+        index_area_h_base = 28
+        
+        scaled_arrow_area_h = arrow_area_h_base * (0.8 + zoom * 0.4) * 1.5 
+        scaled_index_area_h = index_area_h_base * (0.6 + zoom * 0.4)
+        scaled_dna_area_h = char_h # Directly based on char_h from zoom
+        scaled_guide_lane_h = (self.viz_char_height_base + 10) * zoom # viz_char_height_base is a constant
+
+        viz_dims = {
+            "eff_char_w": eff_char_w, "base_render_w": base_render_w, "char_h": char_h,
+            "base_font": ("Courier New", base_font_size, "bold"),
+            "index_font": ("Arial", index_font_size),
+            "guide_font_below": ("Courier New", base_font_size), # Assuming same as base_font
+            "y_5_3_labels": self.viz_padding - 15,
+            "y_pam_arrows_base": self.viz_padding + scaled_arrow_area_h / 2,
+            "y_dna_mid": self.viz_padding + scaled_arrow_area_h + scaled_dna_area_h / 2,
+            "y_indices_baseline": self.viz_padding + scaled_arrow_area_h + scaled_dna_area_h + scaled_index_area_h * 0.8,
+            "y_guides_start": self.viz_padding + scaled_arrow_area_h + scaled_dna_area_h + scaled_index_area_h + 10,
+            "guide_lane_h_effective": max(10.0, scaled_guide_lane_h),
+            "base_gap_eff": self.viz_base_gap_pixels * zoom,
+            "arrow_level_offset_eff": max(3.0, 5 * zoom)
+        }
+        self._cached_viz_dims_zoom = zoom
+        self._cached_viz_dims = viz_dims
+        return viz_dims
+
+    def _redraw_static_visualization(self):
+        canvas = self.viz_canvas # Local alias
+        canvas.delete("static_viz_elements")
+        if not self.dna_sequence_cleaned: return
+
+        vd = self._get_viz_fonts_and_dims() # Uses cache
+        dna_cleaned_len = len(self.dna_sequence_cleaned)
+        total_seq_render_width = dna_cleaned_len * vd["eff_char_w"]
+        min_canvas_height = vd["y_guides_start"] + (self.viz_max_guide_lanes * vd["guide_lane_h_effective"]) + self.viz_padding
+        canvas.config(scrollregion=(0, 0, total_seq_render_width + 2 * self.viz_padding, min_canvas_height))
+        
+        label_font = ("Arial", max(7, int(9 * self.viz_zoom_level)), "italic")
+        canvas.create_text(self.viz_padding - 10, vd["y_dna_mid"], text="5'", anchor=tk.E, font=label_font, fill="gray50", tags="static_viz_elements")
+        canvas.create_text(self.viz_padding + total_seq_render_width + 10, vd["y_dna_mid"], text="3'", anchor=tk.W, font=label_font, fill="gray50", tags="static_viz_elements")
+
+        if vd["base_render_w"] > 2: 
+            for i, base in enumerate(self.dna_sequence_cleaned):
+                x_base_center = self.viz_padding + i * vd["eff_char_w"] + vd["base_render_w"] / 2
+                canvas.create_text(x_base_center, vd["y_dna_mid"], text=base, font=vd["base_font"], tags=("static_viz_elements", "dna_base", f"base_{i}"))
+        
+        index_interval = max(1, int(50 / vd["eff_char_w"])) 
+        for i in range(0, dna_cleaned_len, index_interval):
+            actual_idx = i + self.dna_start_offset
+            x_idx_center = self.viz_padding + i * vd["eff_char_w"] + vd["base_render_w"] / 2
+            canvas.create_text(x_idx_center, vd["y_indices_baseline"], text=str(actual_idx), font=vd["index_font"], anchor=tk.N, tags=("static_viz_elements", "dna_index"))
+        if dna_cleaned_len > 0 and (dna_cleaned_len-1) % index_interval != 0 :
+            i_last = dna_cleaned_len-1
+            x_last_idx_center = self.viz_padding + i_last * vd["eff_char_w"] + vd["base_render_w"] / 2
+            canvas.create_text(x_last_idx_center, vd["y_indices_baseline"], text=str(i_last+self.dna_start_offset), font=vd["index_font"], anchor=tk.N, tags=("static_viz_elements", "dna_index"))
+
+        show_pams_viz = self.viz_mode_pams_var.get()
+        show_cuts_viz = self.viz_mode_cuts_var.get()
+        
+        guides_to_draw_in_viz = [(idx, gd) for idx, gd in enumerate(self.found_guides_data_master) if idx not in self.hidden_guide_indices]
+        guides_to_draw_in_viz.sort(key=lambda x: (x[1]["pam_actual_match_start_on_dna"], x[1]["pam_actual_match_end_on_dna"]))
+        
+        arrow_y_options = [vd["y_pam_arrows_base"], vd["y_pam_arrows_base"] - vd["arrow_level_offset_eff"], vd["y_pam_arrows_base"] + vd["arrow_level_offset_eff"]]
+        occupied_arrow_slots = [[] for _ in arrow_y_options] # Stores (x_min, x_max) for each level
+
+        for master_idx, guide_data in guides_to_draw_in_viz:
+            arrow_tag = f"arrow_viz_{master_idx}"
+            cut_marker_tag = f"cut_marker_viz_{master_idx}"
+            pam_bg_tag = f"pambg_viz_{master_idx}"
+            feature_clickable_tag = f"feature_item_{master_idx}"
+            
+            # Use pre-calculated relative string indices
+            pam_s_str_idx = guide_data["pam_s_str_idx"]
+            pam_e_str_idx = guide_data["pam_e_str_idx"]
+            
+            x1_pam_eff = self.viz_padding + pam_s_str_idx * vd["eff_char_w"]
+            x2_pam_eff = self.viz_padding + (pam_e_str_idx + 1) * vd["eff_char_w"] - vd["base_gap_eff"]
+            y1_pam_rect_dna = vd["y_dna_mid"] - vd["char_h"] / 2
+            y2_pam_rect_dna = vd["y_dna_mid"] + vd["char_h"] / 2
+
+            if show_pams_viz:
+                canvas.create_rectangle(x1_pam_eff, y1_pam_rect_dna, x2_pam_eff, y2_pam_rect_dna,
+                                                 fill=guide_data["color"], outline="", stipple="gray12", 
+                                                 tags=("static_viz_elements", feature_clickable_tag, pam_bg_tag))
+                arrow_head_len = max(4.0, 6 * self.viz_zoom_level)
+                arrow_head_width = max(5.0, 7 * self.viz_zoom_level)
+                default_shaft_width = max(1.5, DEFAULT_ARROW_SHAFT_WIDTH_FACTOR * self.viz_zoom_level)
+                
+                is_pam_5prime_to_guide_on_strand = (guide_data["strand"] == "+" and guide_data["pam_definition_orientation"] == "5'") or \
+                                                   (guide_data["strand"] == "-" and guide_data["pam_definition_orientation"] == "3'")
+                arrow_start_x, arrow_end_x = (x1_pam_eff, x2_pam_eff) if is_pam_5prime_to_guide_on_strand else (x2_pam_eff, x1_pam_eff)
+                
+                current_arrow_x_min = min(arrow_start_x, arrow_end_x)
+                current_arrow_x_max = max(arrow_start_x, arrow_end_x)
+                
+                assigned_level_idx = -1
+                for level_idx, slots_in_level in enumerate(occupied_arrow_slots):
+                    # Check for overlap with existing arrows in this level
+                    if not any(max(current_arrow_x_min, slot_x1) < min(current_arrow_x_max, slot_x2) for slot_x1, slot_x2 in slots_in_level):
+                        assigned_level_idx = level_idx
+                        break
+                if assigned_level_idx == -1: assigned_level_idx = 0 # Default to first level if all overlap (or use a modulo for more levels)
+                
+                arrow_y_to_use = arrow_y_options[assigned_level_idx]
+                occupied_arrow_slots[assigned_level_idx].append((current_arrow_x_min, current_arrow_x_max))
+                
+                canvas.create_line(arrow_start_x, arrow_y_to_use, arrow_end_x, arrow_y_to_use, 
+                                            arrow=tk.LAST, fill=guide_data["color"], width=default_shaft_width,
+                                            arrowshape=(arrow_head_len, arrow_head_width, max(1.0, default_shaft_width / 2)),
+                                            tags=("static_viz_elements", feature_clickable_tag, arrow_tag))
+
+            if show_cuts_viz:
+                cut_site_5_prime_str_idx = guide_data["cut_site_str_idx"] # Use pre-calculated
+                x_cut_marker = self.viz_padding + (cut_site_5_prime_str_idx + 1) * vd["eff_char_w"] - (vd["base_gap_eff"]/2) 
+                if cut_site_5_prime_str_idx < 0 : 
+                    x_cut_marker = self.viz_padding - (vd["base_gap_eff"]/2) 
+                
+                default_cut_width = max(1.0, DEFAULT_CUT_SITE_WIDTH_FACTOR * self.viz_zoom_level)
+                canvas.create_line(x_cut_marker, y1_pam_rect_dna - 5, x_cut_marker, y2_pam_rect_dna + 5,
+                                            fill=guide_data["color"], width=default_cut_width, dash=(2,2),
+                                            tags=("static_viz_elements", feature_clickable_tag, cut_marker_tag))
+        self._update_dynamic_visuals_for_selection()
+
+
+    def _update_dynamic_visuals_for_selection(self):
+        canvas = self.viz_canvas # Local alias
+        canvas.delete("dynamic_selection_elements")
+        vd = self._get_viz_fonts_and_dims() # Uses cache
+
+        # Reset appearance of all potentially visible items first
+        for master_idx, guide_data in enumerate(self.found_guides_data_master):
+            if master_idx in self.hidden_guide_indices: continue
+            arrow_tag = f"arrow_viz_{master_idx}"; cut_marker_tag = f"cut_marker_viz_{master_idx}"
+            default_arrow_shaft_width = max(1.5, DEFAULT_ARROW_SHAFT_WIDTH_FACTOR * self.viz_zoom_level)
+            default_cut_marker_width = max(1.0, DEFAULT_CUT_SITE_WIDTH_FACTOR * self.viz_zoom_level)
+            
+            # Check if tags exist before trying to itemconfig
+            if canvas.find_withtag(arrow_tag):
+                canvas.itemconfig(arrow_tag, fill=guide_data["color"], width=default_arrow_shaft_width)
+            if canvas.find_withtag(cut_marker_tag):
+                canvas.itemconfig(cut_marker_tag, fill=guide_data["color"], width=default_cut_marker_width)
+
+        if not self.selected_master_indices or not self.dna_sequence_cleaned: return
+
+        # Optimized Lane Assignment
+        lanes_intervals = [[] for _ in range(self.viz_max_guide_lanes)] # Stores (start, end) for each lane
+        item_to_lane_map = {}
+        
+        # Sort selected guides by their start position on the string
+        sorted_selected_master_indices = sorted(
+            [idx for idx in self.selected_master_indices if idx not in self.hidden_guide_indices],
+            key=lambda idx: self.found_guides_data_master[idx]["guide_s_str_idx"] # Use pre-calculated
+        )
+
+        for master_idx in sorted_selected_master_indices:
+            # guide_data is already fetched if needed, or use self.found_guides_data_master[master_idx]
+            guide_s_str_idx = self.found_guides_data_master[master_idx]["guide_s_str_idx"]
+            guide_e_str_idx = self.found_guides_data_master[master_idx]["guide_e_str_idx"]
+            
+            assigned_lane_idx = -1
+            for current_lane_idx in range(self.viz_max_guide_lanes):
+                is_lane_free = not any(max(guide_s_str_idx, occ_s) <= min(guide_e_str_idx, occ_e)
+                                       for occ_s, occ_e in lanes_intervals[current_lane_idx])
+                if is_lane_free:
+                    lanes_intervals[current_lane_idx].append((guide_s_str_idx, guide_e_str_idx))
+                    item_to_lane_map[master_idx] = current_lane_idx
+                    assigned_lane_idx = current_lane_idx
+                    break
+            if assigned_lane_idx == -1: # All lanes are occupied in the region of this guide
+                # Default to the last lane (it will overlap, but this is the fallback)
+                target_lane_idx = self.viz_max_guide_lanes - 1
+                lanes_intervals[target_lane_idx].append((guide_s_str_idx, guide_e_str_idx))
+                item_to_lane_map[master_idx] = target_lane_idx
+
+
+        for master_idx in self.selected_master_indices: # Iterate original selection for drawing
+            if master_idx in self.hidden_guide_indices: continue
+            guide_data = self.found_guides_data_master[master_idx]
+            arrow_tag = f"arrow_viz_{master_idx}"; cut_marker_tag = f"cut_marker_viz_{master_idx}"
+            feature_clickable_tag = f"feature_item_{master_idx}"
+            
+            pam_s_str_idx = guide_data["pam_s_str_idx"] # Use pre-calculated
+            pam_e_str_idx = guide_data["pam_e_str_idx"] # Use pre-calculated
+            
+            x1_pam_eff = self.viz_padding + pam_s_str_idx * vd["eff_char_w"]
+            x2_pam_eff = self.viz_padding + (pam_e_str_idx + 1) * vd["eff_char_w"] - vd["base_gap_eff"]
+            y1_pam_rect_dna = vd["y_dna_mid"] - vd["char_h"] / 2
+            y2_pam_rect_dna = vd["y_dna_mid"] + vd["char_h"] / 2
+            canvas.create_rectangle(x1_pam_eff, y1_pam_rect_dna, x2_pam_eff, y2_pam_rect_dna,
+                                             outline=SELECTED_PAM_OUTLINE_COLOR, width=max(1.5, 2 * self.viz_zoom_level), fill="",
+                                             tags=("dynamic_selection_elements", feature_clickable_tag, f"sel_outline_{master_idx}"))
+            
+            selected_arrow_shaft_width = max(1.5, SELECTED_ARROW_SHAFT_WIDTH_FACTOR * self.viz_zoom_level)
+            selected_cut_marker_width = max(1.0, SELECTED_CUT_SITE_WIDTH_FACTOR * self.viz_zoom_level)
+
+            if self.viz_mode_pams_var.get() and canvas.find_withtag(arrow_tag):
+                canvas.itemconfig(arrow_tag, fill=SELECTED_ARROW_COLOR, width=selected_arrow_shaft_width)
+                canvas.tag_raise(arrow_tag)
+            if self.viz_mode_cuts_var.get() and canvas.find_withtag(cut_marker_tag):
+                canvas.itemconfig(cut_marker_tag, fill=SELECTED_CUT_SITE_COLOR, width=selected_cut_marker_width)
+                canvas.tag_raise(cut_marker_tag)
+
+            lane_num = item_to_lane_map.get(master_idx, self.viz_max_guide_lanes - 1) # Default to last lane if not mapped
+            y_guide_baseline = vd["y_guides_start"] + (lane_num * vd["guide_lane_h_effective"]) + (vd["guide_lane_h_effective"] / 2)
+            
+            if vd["base_render_w"] > 1.5:
+                guide_s_str_idx_local = guide_data["guide_s_str_idx"] # Use pre-calculated
+                for i, base_char in enumerate(guide_data["guide_sequence"]):
+                    char_idx_on_main_seq = guide_s_str_idx_local + i
+                    # Small optimization: check if char is within current view (approx)
+                    # This is more complex to get right perfectly, so skipping for "exact functionality"
+                    if 0 <= char_idx_on_main_seq < len(self.dna_sequence_cleaned):
+                        x_guide_char_center = self.viz_padding + char_idx_on_main_seq * vd["eff_char_w"] + vd["base_render_w"] / 2
+                        canvas.create_text(x_guide_char_center, y_guide_baseline, text=base_char,
+                                                    font=vd["guide_font_below"], fill=guide_data["color"],
+                                                    tags=("dynamic_selection_elements", feature_clickable_tag, f"sel_guidetxt_{master_idx}"))
+                
+                pam_text_on_dna = guide_data['pam_sequence_found']
+                pam_start_on_dna_str_idx = guide_data["pam_s_str_idx"] # Use pre-calculated
+                for j, pam_char in enumerate(pam_text_on_dna):
+                    pam_char_dna_idx = pam_start_on_dna_str_idx + j
+                    if 0 <= pam_char_dna_idx < len(self.dna_sequence_cleaned):
+                        x_pam_char_center = self.viz_padding + pam_char_dna_idx * vd["eff_char_w"] + vd["base_render_w"] / 2
+                        canvas.create_text(x_pam_char_center, y_guide_baseline, text=pam_char,
+                                                    font=vd["guide_font_below"], fill=guide_data["color"],
+                                                    tags=("dynamic_selection_elements", feature_clickable_tag, f"sel_pamviztxt_{master_idx}"))
+        canvas.tag_raise("dynamic_selection_elements")
+
+
+    def _zoom_action(self, factor, event=None):
+        if not self.dna_sequence_cleaned: return
+        canvas = self.viz_canvas # Local alias
+        
+        view_x_anchor = canvas.canvasx(event.x) if event else canvas.canvasx(canvas.winfo_width() / 2)
+        
+        # Get current dimensions before zoom changes
+        vd_current = self._get_viz_fonts_and_dims()
+        current_total_width = len(self.dna_sequence_cleaned) * vd_current["eff_char_w"] + 2 * self.viz_padding
+        relative_pos_anchor = view_x_anchor / current_total_width if current_total_width > 0 else 0
+        
+        self.viz_zoom_level *= factor
+        self.viz_zoom_level = max(0.05, min(10.0, self.viz_zoom_level))
+        
+        # Invalidate viz_dims cache by setting zoom level to None, so it's recomputed
+        self._cached_viz_dims_zoom = None 
+        
+        self._redraw_static_visualization() # This will re-cache vd
+        
+        vd_new = self._get_viz_fonts_and_dims() # Get newly cached/computed vd
+        total_width_new = len(self.dna_sequence_cleaned) * vd_new["eff_char_w"] + 2 * self.viz_padding
+        new_abs_pos_anchor = relative_pos_anchor * total_width_new
+        
+        scroll_to_x = new_abs_pos_anchor - (event.x if event else (canvas.winfo_width() / 2))
+        
+        if total_width_new > 0 :
+            canvas.xview_moveto(max(0.0, min(1.0, scroll_to_x / total_width_new)))
+        else:
+            canvas.xview_moveto(0.0)
+
+
+    def _zoom_in_viz(self): self._zoom_action(1.25)
+    def _zoom_out_viz(self): self._zoom_action(0.8)
+
+    def _on_mouse_wheel_zoom(self, event):
+        factor = 1.1 if (event.num == 4 or event.delta > 0) else (1/1.1 if (event.num == 5 or event.delta < 0) else 1.0)
+        if factor != 1.0:
+            self._zoom_action(factor, event)
+        return "break" # Prevents default scroll
+
+    def _on_canvas_drag_start(self, event):
+        self.viz_canvas.scan_mark(event.x, 0) # y is 0 for x-only scroll
+        self._drag_scan_mark_x = event.x
+        return "break"
+
+    def _on_canvas_drag_motion(self, event):
+        self.viz_canvas.scan_dragto(event.x, 0, gain=1) # y is 0
+        return "break"
+
+    def _on_canvas_drag_end(self, event):
+        # If drag was minimal, treat as a click for context menu
+        if abs(event.x - self._drag_scan_mark_x) < 5 : 
+            self._show_canvas_context_menu(event)
+        # No return "break" needed here unless we want to prevent other bindings
+
+    def _handle_canvas_click(self, event, add_to_selection):
+        canvas = self.viz_canvas # Local alias
+        canvas_x = canvas.canvasx(event.x); canvas_y = canvas.canvasy(event.y)
+        
+        # Find items near the click, search a slightly larger area for easier clicking
+        # find_closest might be an option too, but find_overlapping is fine for features.
+        clicked_ids = canvas.find_overlapping(canvas_x-1, canvas_y-1, canvas_x+1, canvas_y+1)
+        
+        clicked_master_idx = None
+        # Iterate in reverse drawing order (topmost items first)
+        for item_id in reversed(clicked_ids): 
+            tags = canvas.gettags(item_id)
+            for t in tags:
+                if t.startswith("feature_item_"):
+                    try:
+                        potential_master_idx = int(t.split("_")[-1])
+                        # Ensure the found item is not hidden
+                        if potential_master_idx not in self.hidden_guide_indices:
+                            clicked_master_idx = potential_master_idx
+                            break # Found a clickable feature
+                    except (ValueError, IndexError): # Robust parsing
+                        continue
+            if clicked_master_idx is not None: break # Exit outer loop
+        
+        if clicked_master_idx is not None:
+            if not add_to_selection: 
+                self.selected_master_indices = {clicked_master_idx}
+            else: # Shift-click behavior
+                if clicked_master_idx in self.selected_master_indices:
+                    self.selected_master_indices.remove(clicked_master_idx)
+                else:
+                    self.selected_master_indices.add(clicked_master_idx)
+        elif not add_to_selection: # Clicked on empty space, not shift-clicking
+            self.selected_master_indices.clear()
+            
+        self._update_dynamic_visuals_for_selection()
+        self._sync_table_selection_from_canvas()
+        self._update_details_pane()
+
+    def _sync_table_selection_from_canvas(self):
+        # Deselect all in table first
+        current_table_selection = self.results_table.selection()
+        if current_table_selection: # Avoid error if selection is empty tuple
+            self.results_table.selection_remove(current_table_selection)
+
+        if self.selected_master_indices:
+            first_iid_to_focus = None
+            iids_to_select_in_table = []
+            for master_idx in sorted(list(self.selected_master_indices)): # Sort for consistent focus
+                table_iid = str(master_idx)
+                if self.results_table.exists(table_iid):
+                    iids_to_select_in_table.append(table_iid)
+                    if first_iid_to_focus is None:
+                        first_iid_to_focus = table_iid
+            
+            if iids_to_select_in_table:
+                self.results_table.selection_set(iids_to_select_in_table)
+            
+            if first_iid_to_focus: # Scroll to the first selected item
+                self.results_table.focus(first_iid_to_focus)
+                self.results_table.see(first_iid_to_focus)
+
+
+    def _scroll_canvas_to_item(self, master_idx):
+        if not (0 <= master_idx < len(self.found_guides_data_master)): return
+        if not self.dna_sequence_cleaned: return
+        
+        guide_data = self.found_guides_data_master[master_idx]
+        vd = self._get_viz_fonts_and_dims() # Uses cache
+        canvas = self.viz_canvas # Local alias
+
+        target_str_idx = guide_data["pam_s_str_idx"] # Use pre-calculated relative index
+        target_x_on_canvas = self.viz_padding + target_str_idx * vd["eff_char_w"]
+        
+        total_content_width = len(self.dna_sequence_cleaned) * vd["eff_char_w"] + 2 * self.viz_padding
+        if total_content_width <= 0: return # Avoid division by zero
+        
+        # Scroll to bring the item to ~10% from the left edge of the visible canvas
+        visible_width = canvas.winfo_width()
+        desired_x_view = target_x_on_canvas - (visible_width * 0.1)
+        
+        fraction = desired_x_view / total_content_width
+        canvas.xview_moveto(max(0.0, min(1.0, fraction)))
+
+
+    def _on_canvas_click(self, event): self._handle_canvas_click(event, add_to_selection=False)
+    def _on_canvas_shift_click(self, event): self._handle_canvas_click(event, add_to_selection=True)
+
+    def _clear_all_selections(self):
+        self.selected_master_indices.clear()
+        # Clear table selection
+        current_table_selection = self.results_table.selection()
+        if current_table_selection:
+            self.results_table.selection_remove(current_table_selection)
+        
+        self._update_dynamic_visuals_for_selection()
+        self._update_details_pane()
+
+    def _reset_viz_view(self):
+        self.viz_zoom_level = 1.0
+        self._cached_viz_dims_zoom = None # Invalidate cache
+        self._redraw_static_visualization()
+        if self.dna_sequence_cleaned: self.viz_canvas.xview_moveto(0)
+
+    def _unhide_all_guides_in_viz(self):
+        if not self.hidden_guide_indices: return # No change needed
+        self.hidden_guide_indices.clear()
+        self._refresh_viz_and_table_col()
+
+    def _refresh_viz_and_table_col(self):
+        self._clear_all_selections() 
+        self._update_table_visibility_column()
+        self._redraw_static_visualization() # This calls _update_dynamic_visuals_for_selection
+        self._update_details_pane() # Details pane depends on selection
+
+    def _create_context_menus(self):
+        self.table_context_menu = tk.Menu(self, tearoff=0)
+        self.table_context_menu.add_command(label="Hide Selected in Viz", command=self._hide_selected_table_items_in_viz)
+        self.table_context_menu.add_command(label="Show Only Selected in Viz", command=self._show_only_selected_table_items_in_viz)
+        self.table_context_menu.add_separator()
+        self.table_context_menu.add_command(label="Hide All in Viz", command=self._hide_all_guides_in_viz)
+        
+        self.canvas_context_menu = tk.Menu(self, tearoff=0)
+        self.canvas_context_menu.add_command(label="Hide this Guide in Viz", command=self._hide_canvas_item_from_context)
+        self.canvas_context_menu.add_command(label="Show Only this Guide in Viz", command=self._show_only_canvas_item_from_context)
+        self.canvas_context_menu.add_separator()
+        self.canvas_context_menu.add_command(label="Hide All in Viz", command=self._hide_all_guides_in_viz)
+        self._last_canvas_context_event = None # To store event for canvas context actions
+
+    def _show_table_context_menu(self, event):
+        has_selection = bool(self.results_table.selection())
+        has_master_guides = bool(self.found_guides_data_master)
+        
+        # Enable/disable menu items based on state
+        for label in ["Hide Selected in Viz", "Show Only Selected in Viz"]:
+            self.table_context_menu.entryconfig(label, state=tk.NORMAL if has_selection else tk.DISABLED)
+        self.table_context_menu.entryconfig("Hide All in Viz", state=tk.NORMAL if has_master_guides else tk.DISABLED)
+        
+        if has_selection or has_master_guides: # Only show if there's something to act on
+            self.table_context_menu.tk_popup(event.x_root, event.y_root)
+
+    def _show_canvas_context_menu(self, event):
+        self._last_canvas_context_event = event # Store event for later use by menu commands
+        clicked_master_idx = self._get_master_idx_from_canvas_event(event)
+        
+        is_on_visible_feature = clicked_master_idx is not None
+        has_master_guides = bool(self.found_guides_data_master)
+
+        for label in ["Hide this Guide in Viz", "Show Only this Guide in Viz"]:
+            self.canvas_context_menu.entryconfig(label, state=tk.NORMAL if is_on_visible_feature else tk.DISABLED)
+        self.canvas_context_menu.entryconfig("Hide All in Viz", state=tk.NORMAL if has_master_guides else tk.DISABLED)
+        
+        # Only show if there's something to act on
+        if is_on_visible_feature or has_master_guides:
+            self.canvas_context_menu.tk_popup(event.x_root, event.y_root)
+
+
+    def _hide_selected_table_items_in_viz(self):
+        selected_iids_str = self.results_table.selection()
+        if not selected_iids_str: return
+        master_indices_to_hide = {int(iid_str) for iid_str in selected_iids_str}
+        self.hidden_guide_indices.update(master_indices_to_hide)
+        self._refresh_viz_and_table_col()
+
+    def _show_only_selected_table_items_in_viz(self):
+        selected_iids_str = self.results_table.selection()
+        if not selected_iids_str: return
+        selected_master_indices_to_show = {int(iid_str) for iid_str in selected_iids_str}
+        # If nothing valid selected, or no master data, do nothing
+        if not selected_master_indices_to_show and not self.found_guides_data_master: return
+
+        all_master_indices = set(range(len(self.found_guides_data_master)))
+        self.hidden_guide_indices = all_master_indices - selected_master_indices_to_show
+        self._refresh_viz_and_table_col()
+
+    def _hide_all_guides_in_viz(self):
+        if not self.found_guides_data_master: return
+        self.hidden_guide_indices = set(range(len(self.found_guides_data_master)))
+        self._refresh_viz_and_table_col()
+
+    def _get_master_idx_from_canvas_event(self, event):
+        if not event: return None
+        canvas = self.viz_canvas # Local alias
+        canvas_x = canvas.canvasx(event.x); canvas_y = canvas.canvasy(event.y)
+        # Consider a small radius for find_closest or use find_overlapping
+        clicked_ids = canvas.find_overlapping(canvas_x-1, canvas_y-1, canvas_x+1, canvas_y+1)
+        for item_id in reversed(clicked_ids): # Check topmost items first
+            tags = canvas.gettags(item_id)
+            for t in tags:
+                if t.startswith("feature_item_"):
+                    try: 
+                        master_idx = int(t.split("_")[-1])
+                        if master_idx not in self.hidden_guide_indices: # Ensure it's a visible feature
+                            return master_idx
+                    except (ValueError, IndexError): continue
+        return None
+
+    def _hide_canvas_item_from_context(self):
+        if not self._last_canvas_context_event: return
+        master_idx = self._get_master_idx_from_canvas_event(self._last_canvas_context_event)
+        if master_idx is not None:
+            self.hidden_guide_indices.add(master_idx)
+            self._refresh_viz_and_table_col()
+        self._last_canvas_context_event = None # Clear after use
+
+    def _show_only_canvas_item_from_context(self):
+        if not self._last_canvas_context_event: return
+        master_idx_to_show = self._get_master_idx_from_canvas_event(self._last_canvas_context_event)
+        if master_idx_to_show is not None:
+            all_master_indices = set(range(len(self.found_guides_data_master)))
+            self.hidden_guide_indices = all_master_indices - {master_idx_to_show}
+            self._refresh_viz_and_table_col()
+        self._last_canvas_context_event = None # Clear after use
+
+# --- Helper Functions ---
+def preprocess_dna_sequence(raw_seq):
+    offset_match = re.search(r"\[0\]", raw_seq)
+    offset_val = 0
+    if offset_match:
+        pre_marker_seq = raw_seq[:offset_match.start()]
+        # Findall is efficient for extracting specific characters
+        valid_chars_before_marker = "".join(re.findall(r"[ACGTURYSMKWBDHVN]", pre_marker_seq.upper()))
+        offset_val = -len(valid_chars_before_marker)
+        raw_seq = raw_seq.replace("[0]", "", 1) # Replace only the first instance
+    
+    cleaned_seq_list = re.findall(r"[ACGTURYSMKWBDHVN]", raw_seq.upper())
+    cleaned_seq = "".join(cleaned_seq_list)
+    
+    if not cleaned_seq and raw_seq.strip(): # If original raw_seq had non-whitespace but no valid chars
+        raise ValueError("Sequence contains no valid DNA/IUPAC characters.")
+    return cleaned_seq, offset_val
+
+def iupac_to_regex(iupac_string):
+    # Optimization: Use list append and join for string building
+    regex_parts = []
+    for char_iupac in iupac_string.upper():
+        regex_parts.append(IUPAC_BASES_REGEX.get(char_iupac, re.escape(char_iupac)))
+    return "".join(regex_parts)
+
+def get_reverse_complement(dna_string):
+    # Optimization: Use list append and join for string building
+    complement_parts = [COMPLEMENT_DNA.get(base_iupac, 'N') for base_iupac in dna_string.upper()]
+    return "".join(complement_parts)[::-1] # Reverse the joined string
+
+if __name__ == "__main__":
+    app = CrisprGuideFinderApp()
+    app.mainloop()
