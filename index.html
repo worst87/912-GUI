@@ -1,0 +1,1150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CRISPresso2 Batch File Creator</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/xlsx/dist/xlsx.full.min.js"></script>
+    <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            primary: '#5D5CDE',
+          }
+        }
+      }
+    }
+    </script>
+    <style>
+        /* Custom styles */
+        .table-container {
+            max-height: 50vh;
+            overflow-y: auto;
+        }
+        th {
+            position: sticky;
+            top: 0;
+            z-index: 10;
+        }
+        .sequence-cell {
+            max-width: 200px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .file-cell {
+            max-width: 250px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .loading-overlay {
+            background: rgba(0,0,0,0.5);
+            z-index: 50;
+        }
+    </style>
+</head>
+<body class="bg-white dark:bg-gray-900 text-gray-800 dark:text-gray-200 transition-colors duration-200">
+    <div id="loading" class="fixed inset-0 loading-overlay flex items-center justify-center hidden">
+        <div class="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-lg flex flex-col items-center">
+            <div class="animate-spin rounded-full h-16 w-16 border-t-4 border-primary"></div>
+            <p class="mt-4 text-lg font-semibold" id="loading-text">Processing...</p>
+        </div>
+    </div>
+
+    <div class="container mx-auto px-4 py-6 max-w-6xl">
+        <h1 class="text-3xl font-bold mb-6 text-center text-primary">CRISPresso2 Batch File Creator</h1>
+
+        <!-- Input Controls Section -->
+        <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-4 mb-4">
+            <h2 class="text-xl font-semibold mb-3">Inputs</h2>
+
+            <!-- FASTQ Files Selection -->
+            <div class="mb-4">
+                <label class="block text-sm font-medium mb-2">FASTQ Files (R1/R2)</label>
+                <input type="file" id="fastq-files" multiple accept=".fastq,.fq,.fastq.gz,.fq.gz"
+                    class="block w-full text-base file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:bg-primary file:text-white hover:file:bg-primary/90 cursor-pointer" />
+                <p id="fastq-list-label" class="mt-2 text-sm text-gray-600 dark:text-gray-400">0 files selected</p>
+            </div>
+
+            <!-- Amplicon Excel -->
+            <div class="mb-4">
+                <label class="block text-sm font-medium mb-2">Amplicon Excel (Optional)</label>
+                <input type="file" id="amplicon-excel" accept=".xlsx,.xls"
+                    class="block w-full text-base file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:bg-primary file:text-white hover:file:bg-primary/90 cursor-pointer" />
+                <p id="amplicon-status" class="mt-2 text-sm"></p>
+            </div>
+
+            <!-- Guide RNA Excel -->
+            <div class="mb-4">
+                <label class="block text-sm font-medium mb-2">Guide RNA Excel (Optional)</label>
+                <input type="file" id="guide-excel" accept=".xlsx,.xls"
+                    class="block w-full text-base file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:bg-primary file:text-white hover:file:bg-primary/90 cursor-pointer" />
+                <p id="guide-status" class="mt-2 text-sm"></p>
+            </div>
+
+            <button id="process-btn" class="w-full bg-primary hover:bg-primary/90 text-white py-2 px-4 rounded-lg transition">
+                Process FASTQ Files & Populate Table
+            </button>
+        </div>
+
+        <!-- Settings Application Section -->
+        <div id="settings-section" class="bg-white dark:bg-gray-800 rounded-lg shadow p-4 mb-4">
+            <h2 class="text-xl font-semibold mb-3">Apply Settings / Clear Selected</h2>
+
+            <!-- Amplicon -->
+            <div class="grid grid-cols-1 md:grid-cols-6 gap-2 mb-3 items-center">
+                <label class="text-sm font-medium md:col-span-1">Amplicon:</label>
+                <div class="md:col-span-2">
+                    <input list="amplicon-list" id="amplicon-combobox" placeholder="Select or type sequence" 
+                        class="w-full border rounded-md py-2 px-3 bg-white dark:bg-gray-700 text-base disabled:opacity-50" disabled />
+                    <datalist id="amplicon-list"></datalist>
+                </div>
+                <button id="apply-amplicon-btn" class="bg-primary hover:bg-primary/90 text-white py-1 px-3 rounded-md text-sm md:col-span-1 transition">
+                    Apply Amplicon
+                </button>
+                <button id="clear-amplicon-btn" class="bg-gray-500 hover:bg-gray-600 text-white py-1 px-3 rounded-md text-sm md:col-span-2 transition">
+                    Clear Selected Amplicons
+                </button>
+            </div>
+
+            <!-- Guide RNA -->
+            <div class="grid grid-cols-1 md:grid-cols-6 gap-2 mb-3 items-center">
+                <label class="text-sm font-medium md:col-span-1">Guide RNA:</label>
+                <div class="md:col-span-2">
+                    <input list="guide-list" id="guide-combobox" placeholder="Select or type sequence" 
+                        class="w-full border rounded-md py-2 px-3 bg-white dark:bg-gray-700 text-base disabled:opacity-50" disabled />
+                    <datalist id="guide-list"></datalist>
+                </div>
+                <button id="apply-guide-btn" class="bg-primary hover:bg-primary/90 text-white py-1 px-3 rounded-md text-sm md:col-span-1 transition">
+                    Apply Guide
+                </button>
+                <button id="clear-guide-btn" class="bg-gray-500 hover:bg-gray-600 text-white py-1 px-3 rounded-md text-sm md:col-span-2 transition">
+                    Clear Selected Guides
+                </button>
+            </div>
+
+            <!-- Min Alignment Score -->
+            <div class="grid grid-cols-1 md:grid-cols-6 gap-2 mb-3 items-center">
+                <label class="text-sm font-medium md:col-span-1">Min Alignment Score:</label>
+                <div class="md:col-span-2">
+                    <input type="number" id="score-entry" min="0" max="100" value="60" 
+                        class="w-full border rounded-md py-2 px-3 bg-white dark:bg-gray-700 text-base" />
+                </div>
+                <button id="apply-score-btn" class="bg-primary hover:bg-primary/90 text-white py-1 px-3 rounded-md text-sm md:col-span-3 transition">
+                    Apply Score
+                </button>
+            </div>
+
+            <!-- Plot Window Size -->
+            <div class="grid grid-cols-1 md:grid-cols-6 gap-2 mb-3 items-center">
+                <label class="text-sm font-medium md:col-span-1">Plot Window Size:</label>
+                <div class="md:col-span-2">
+                    <input type="number" id="window-entry" min="0" value="30" 
+                        class="w-full border rounded-md py-2 px-3 bg-white dark:bg-gray-700 text-base" />
+                </div>
+                <button id="apply-window-btn" class="bg-primary hover:bg-primary/90 text-white py-1 px-3 rounded-md text-sm md:col-span-3 transition">
+                    Apply Window Size
+                </button>
+            </div>
+        </div>
+
+        <!-- Action Buttons -->
+        <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-4 mb-4 flex flex-wrap gap-2">
+            <button id="delete-rows-btn" class="bg-red-600 hover:bg-red-700 text-white py-2 px-4 rounded-lg transition">
+                Delete Selected Rows
+            </button>
+            <button id="copy-command-btn" class="bg-primary hover:bg-primary/90 text-white py-2 px-4 rounded-lg transition">
+                Copy CRISPresso2 Command
+            </button>
+            <button id="save-tsv-btn" class="ml-auto bg-green-600 hover:bg-green-700 text-white py-2 px-4 rounded-lg transition">
+                Create Tab Delimited File
+            </button>
+        </div>
+
+        <!-- Table Preview -->
+        <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
+            <h2 class="text-xl font-semibold mb-3">Preview (Click Row to Select/Deselect)</h2>
+            <div class="table-container border border-gray-300 dark:border-gray-700 rounded-lg">
+                <table id="data-table" class="min-w-full divide-y divide-gray-300 dark:divide-gray-700">
+                    <thead class="bg-gray-100 dark:bg-gray-800">
+                        <tr>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider w-24">Name</th>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">FASTQ R1</th>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">FASTQ R2</th>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Amplicon Seq</th>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Guide Seq</th>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider text-center w-20">Min Score</th>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider text-center w-24">Window Size</th>
+                        </tr>
+                    </thead>
+                    <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-300 dark:divide-gray-700" id="table-body">
+                        <!-- Table content will be dynamically populated -->
+                        <tr class="text-center">
+                            <td colspan="7" class="py-4 text-gray-500 dark:text-gray-400">No data available</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            <div class="mt-2 text-sm text-gray-600 dark:text-gray-400">
+                <span id="selection-count">0</span> rows selected
+            </div>
+        </div>
+
+        <div id="message-area" class="mt-4"></div>
+    </div>
+
+    <!-- Modal for messages -->
+    <div id="modal" class="fixed inset-0 bg-black bg-opacity-50 hidden flex items-center justify-center z-50">
+        <div class="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-lg max-w-lg w-full max-h-[80vh] flex flex-col">
+            <div class="flex justify-between items-start mb-4">
+                <h3 id="modal-title" class="text-xl font-semibold"></h3>
+                <button id="modal-close" class="text-gray-500 hover:text-gray-700 dark:hover:text-gray-300">
+                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                    </svg>
+                </button>
+            </div>
+            <div id="modal-content" class="overflow-y-auto mb-4 flex-grow"></div>
+            <div class="flex justify-end">
+                <button id="modal-ok" class="bg-primary hover:bg-primary/90 text-white py-2 px-4 rounded transition">OK</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Dark mode detection and toggle
+        if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+            document.documentElement.classList.add('dark');
+        }
+        window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', event => {
+            if (event.matches) {
+                document.documentElement.classList.add('dark');
+            } else {
+                document.documentElement.classList.remove('dark');
+            }
+        });
+
+        // --- App State ---
+        const state = {
+            fastqFiles: [],
+            pairedFilesData: [],
+            selectedRows: new Set(),
+            ampliconLookup: null,
+            guideLookup: null,
+            ampliconNamesList: [],
+            guideNamesList: [],
+            lastSavedFilename: "",
+            lastSavedContent: ""
+        };
+
+        // --- Core Logic Functions ---
+
+        function extractBaseName(filename) {
+            const base = filename.split('/').pop();
+
+            if (base.includes('_')) {
+                return base.split('_', 1)[0];
+            } else {
+                // Try removing common suffixes more robustly
+                const simplifiedBase = base.replace(/(_R[12]|\.[12])?(_\d+)?(\.f(ast)?q)?(\.gz)?$/i, '');
+                // If removal didn't change anything substantial, split by first dot as fallback
+                if (!simplifiedBase || simplifiedBase === base) {
+                    return base.split('.', 1)[0];
+                }
+                return simplifiedBase;
+            }
+        }
+
+        function pairFastqFiles(fileList) {
+            const pairs = {};
+            const unpairedR1 = {};
+            const unpairedR2 = {};
+            const processedIndices = new Set();
+
+            // Map file objects to their names for easier lookup
+            const fileBasenames = fileList.map(f => f.name);
+            const fileMap = {};
+            fileList.forEach(f => fileMap[f.name] = f);
+
+            // Patterns for matching pairs (R1/R2)
+            const patterns = [
+                [/(\.|_)R1(\.|_)/, '$1R2$2'], 
+                [/(\.|_)1(\.|_)/, '$12$2'],
+                [/(\.|_)R1(?=\.f|\.fq|\.fastq|\.gz|$)/, '$1R2'], 
+                [/(\.|_)1(?=\.f|\.fq|\.fastq|\.gz|$)/, '$12'],
+                [/R1(?=\.f|\.fq|\.fastq|\.gz|$)/, 'R2'], 
+                [/1(?=\.f|\.fq|\.fastq|\.gz|$)/, '2']
+            ];
+
+            console.log(`Attempting to pair ${fileList.length} files...`);
+
+            for (let i = 0; i < fileList.length; i++) {
+                if (processedIndices.has(i)) continue;
+
+                const r1Path = fileList[i];
+                const r1Base = fileBasenames[i];
+                let foundPair = false;
+
+                for (const [r1PatternRe, r2ReplacementStr] of patterns) {
+                    // Use replace for substitution logic
+                    const potentialR2Base = r1Base.replace(r1PatternRe, r2ReplacementStr);
+
+                    // Check if substitution happened and the potential R2 exists
+                    if (potentialR2Base !== r1Base && fileMap[potentialR2Base]) {
+                        const r2Path = fileMap[potentialR2Base];
+                        const r2Index = fileBasenames.indexOf(potentialR2Base);
+
+                        if (!processedIndices.has(r2Index)) {
+                            const baseName = extractBaseName(r1Path.name);
+
+                            if (!pairs[baseName]) {
+                                pairs[baseName] = { r1: r1Path, r2: r2Path };
+                                processedIndices.add(i);
+                                processedIndices.add(r2Index);
+                                console.log(`Paired: '${r1Base}' and '${potentialR2Base}' under base name '${baseName}'`);
+                                foundPair = true;
+                                break;
+                            } else {
+                                // Handle potential duplicate base names
+                                const reason = `Duplicate base name '${baseName}'`;
+                                unpairedR1[r1Path.name] = reason;
+
+                                if (!processedIndices.has(r2Index)) {
+                                    unpairedR2[r2Path.name] = reason;
+                                    processedIndices.add(r2Index);
+                                }
+
+                                processedIndices.add(i);
+                                console.log(`Warning: ${reason} for files '${r1Base}' and '${potentialR2Base}'. Marking as unpaired.`);
+                                foundPair = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                // If no pair found and not processed as duplicate
+                if (!foundPair && !processedIndices.has(i)) {
+                    // Check if it looks like an R2 file
+                    const isLikelyR2 = patterns.some(([_, r2Pattern]) => {
+                        // Create a dummy R1 test string to see if replacing it would match our filename
+                        const dummyR1 = "DUMMY_R1.fastq";
+                        const dummyR2 = dummyR1.replace(/R1/, "R2");
+                        const r2Regex = new RegExp(dummyR2.replace("DUMMY_", "").replace(".fastq", ""), "i");
+                        return r2Regex.test(r1Base);
+                    });
+
+                    if (!isLikelyR2) {
+                        unpairedR1[r1Path.name] = "No matching R2 found or pattern mismatch";
+                        console.log(`Unpaired R1 candidate: '${r1Base}' - No matching R2 found.`);
+                    } else {
+                        unpairedR2[r1Path.name] = "No matching R1 found or pattern mismatch";
+                        console.log(`Unpaired R2: '${r1Base}' - No matching R1 found.`);
+                    }
+
+                    processedIndices.add(i);
+                }
+            }
+
+            // Convert pairs object to array format
+            const pairsArray = Object.entries(pairs).map(([name, files]) => ({
+                name,
+                r1: files.r1,
+                r2: files.r2
+            }));
+
+            return [pairsArray, unpairedR1, unpairedR2];
+        }
+
+        async function loadExcelData(file) {
+            if (!file) {
+                return [null, null, "No file selected"];
+            }
+
+            try {
+                const data = await file.arrayBuffer();
+                const workbook = XLSX.read(data, { type: 'array' });
+                const firstSheetName = workbook.SheetNames[0];
+                const worksheet = workbook.Sheets[firstSheetName];
+
+                // Convert to JSON (get all data)
+                const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: "" });
+
+                if (jsonData.length <= 1) {
+                    return [null, null, `Excel file '${file.name}' has no data or only headers.`];
+                }
+
+                if (jsonData[0].length < 2) {
+                    return [null, null, `Excel file '${file.name}' has fewer than 2 columns.`];
+                }
+
+                // Get original names and sequences from first two columns
+                // Skip header row (row 0)
+                const originalNames = [];
+                const lookupDict = {};
+
+                for (let i = 1; i < jsonData.length; i++) {
+                    const row = jsonData[i];
+                    const name = String(row[0] || "").trim();
+                    const sequence = String(row[1] || "").trim();
+
+                    if (name) {
+                        originalNames.push(name);
+                        lookupDict[name.toUpperCase()] = sequence;
+                    }
+                }
+
+                if (Object.keys(lookupDict).length === 0) {
+                    return [null, null, `No valid Name/Sequence pairs found in '${file.name}'.`];
+                }
+
+                return [lookupDict, originalNames, null];
+            } catch (e) {
+                return [null, null, `Error reading Excel file '${file.name}': ${e.message}`];
+            }
+        }
+
+        function getSequenceFromName(selectedName, lookupDict, fileTypeForError) {
+            if (!selectedName) {
+                return ["", `No ${fileTypeForError} name selected from dropdown.`];
+            }
+
+            if (!lookupDict) {
+                return ["", `Cannot lookup ${fileTypeForError} name '${selectedName}'. No lookup file loaded.`];
+            }
+
+            const lookupKey = selectedName.trim().toUpperCase();
+            const seq = lookupDict[lookupKey];
+
+            if (seq !== undefined) {
+                const seqUpper = String(seq).toUpperCase().trim();
+                if (/^[ATCGN]*$/.test(seqUpper)) {
+                    return [seqUpper, null];
+                } else {
+                    return ["", `${fileTypeForError} name '${selectedName}' has invalid characters in sequence: '${seq}'`];
+                }
+            } else {
+                return ["", `${fileTypeForError} name '${selectedName}' not found in loaded lookup data.`];
+            }
+        }
+
+        function isValidSequence(seqStr) {
+            if (typeof seqStr !== 'string') return false;
+
+            const strippedVal = seqStr.trim().toUpperCase();
+            if (!strippedVal) return false;
+
+            // Allow only ATCGN characters
+            const isOnlyValidChars = /^[ATCGN]+$/.test(strippedVal);
+            // Length check
+            const isLongEnough = strippedVal.length >= 15;
+
+            return isOnlyValidChars && isLongEnough;
+        }
+
+        function reverseComplement(seq) {
+            if (typeof seq !== 'string') return "";
+
+            seq = seq.toUpperCase();
+            const complementMap = { 'A': 'T', 'T': 'A', 'C': 'G', 'G': 'C', 'N': 'N' };
+
+            return seq
+                .split('')
+                .reverse()
+                .map(base => complementMap[base] || base)
+                .join('');
+        }
+
+        function findGuideInAmplicon(amplicon, guide) {
+            if (!amplicon || !guide) return null;
+
+            const ampliconUpper = amplicon.toUpperCase();
+            const guideUpper = guide.toUpperCase();
+
+            // Try finding the guide directly
+            let startIndex = ampliconUpper.indexOf(guideUpper);
+            if (startIndex !== -1) return startIndex;
+
+            // Try finding the reverse complement
+            const guideRevcomp = reverseComplement(guideUpper);
+            if (!guideRevcomp) return null;
+
+            startIndex = ampliconUpper.indexOf(guideRevcomp);
+            if (startIndex !== -1) return startIndex;
+
+            return null;
+        }
+
+        // --- UI Utility Functions ---
+
+        function showLoading(message = "Processing...") {
+            document.getElementById('loading').classList.remove('hidden');
+            document.getElementById('loading-text').textContent = message;
+        }
+
+        function hideLoading() {
+            document.getElementById('loading').classList.add('hidden');
+        }
+
+        function showMessage(message, type = 'info') {
+            const messageArea = document.getElementById('message-area');
+            const alertClasses = {
+                'info': 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200',
+                'success': 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200',
+                'warning': 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200',
+                'error': 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200'
+            };
+
+            const alert = document.createElement('div');
+            alert.className = `p-4 mb-4 rounded-lg ${alertClasses[type]} relative`;
+            alert.innerHTML = `
+                <p>${message}</p>
+                <button class="absolute top-1 right-1 p-1 hover:bg-white/20 rounded-full" onclick="this.parentElement.remove()">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                    </svg>
+                </button>
+            `;
+
+            messageArea.prepend(alert);
+
+            // Auto remove after 5 seconds
+            setTimeout(() => {
+                if (alert.parentElement) {
+                    alert.remove();
+                }
+            }, 5000);
+        }
+
+        function showModal(title, content, onOk = null) {
+            document.getElementById('modal-title').textContent = title;
+            document.getElementById('modal-content').innerHTML = content;
+            document.getElementById('modal').classList.remove('hidden');
+
+            // Set up close handlers
+            const closeModal = () => {
+                document.getElementById('modal').classList.add('hidden');
+            };
+
+            document.getElementById('modal-close').onclick = closeModal;
+            document.getElementById('modal-ok').onclick = () => {
+                closeModal();
+                if (onOk) onOk();
+            };
+        }
+
+        // --- Event Handler Implementation ---
+
+        function handleFastqSelection(e) {
+            const files = e.target.files;
+            if (files.length > 0) {
+                state.fastqFiles = Array.from(files);
+                const displayNames = state.fastqFiles.map(f => f.name);
+
+                // Limit displayed names if too many
+                const maxDisplay = 5;
+                let displayText;
+
+                if (displayNames.length > maxDisplay) {
+                    displayText = `${state.fastqFiles.length} files selected: ${displayNames.slice(0, maxDisplay).join(', ')}, ...`;
+                } else {
+                    displayText = `${state.fastqFiles.length} files selected: ${displayNames.join(', ')}`;
+                }
+
+                document.getElementById('fastq-list-label').textContent = displayText;
+            }
+        }
+
+        async function handleExcelSelection(e, type) {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            showLoading(`Loading ${type} data...`);
+
+            let statusElement, datalist, combobox;
+
+            if (type === 'amplicon') {
+                statusElement = document.getElementById('amplicon-status');
+                datalist = document.getElementById('amplicon-list');
+                combobox = document.getElementById('amplicon-combobox');
+            } else if (type === 'guide') {
+                statusElement = document.getElementById('guide-status');
+                datalist = document.getElementById('guide-list');
+                combobox = document.getElementById('guide-combobox');
+            }
+
+            try {
+                const [lookupDict, namesList, err] = await loadExcelData(file);
+
+                if (err) {
+                    statusElement.textContent = "Error loading";
+                    statusElement.className = "mt-2 text-sm text-red-500";
+                    combobox.disabled = true;
+                    datalist.innerHTML = '';
+                    showMessage(err, 'error');
+
+                    if (type === 'amplicon') {
+                        state.ampliconLookup = null;
+                        state.ampliconNamesList = [];
+                    } else {
+                        state.guideLookup = null;
+                        state.guideNamesList = [];
+                    }
+                } else {
+                    statusElement.textContent = `${Object.keys(lookupDict).length} entries loaded`;
+                    statusElement.className = "mt-2 text-sm text-green-500";
+                    combobox.disabled = false;
+
+                    // Update datalist options
+                    datalist.innerHTML = '';
+                    namesList.forEach(name => {
+                        const option = document.createElement('option');
+                        option.value = name;
+                        datalist.appendChild(option);
+                    });
+
+                    if (type === 'amplicon') {
+                        state.ampliconLookup = lookupDict;
+                        state.ampliconNamesList = namesList;
+                    } else {
+                        state.guideLookup = lookupDict;
+                        state.guideNamesList = namesList;
+                    }
+
+                    showMessage(`Successfully loaded ${Object.keys(lookupDict).length} entries from ${file.name}`, 'success');
+                }
+            } catch (error) {
+                console.error(`Error processing ${type} Excel:`, error);
+                statusElement.textContent = "Load failed";
+                statusElement.className = "mt-2 text-sm text-red-500";
+                combobox.disabled = true;
+
+                if (type === 'amplicon') {
+                    state.ampliconLookup = null;
+                    state.ampliconNamesList = [];
+                } else {
+                    state.guideLookup = null;
+                    state.guideNamesList = [];
+                }
+
+                showMessage(`Failed to load ${file.name}: ${error.message}`, 'error');
+            } finally {
+                hideLoading();
+            }
+        }
+
+        async function processFastqFiles() {
+            if (state.fastqFiles.length === 0) {
+                showMessage("Please select FASTQ files first.", 'warning');
+                return;
+            }
+
+            showLoading("Pairing FASTQ files...");
+
+            try {
+                // Clear existing table and data
+                const tableBody = document.getElementById('table-body');
+                tableBody.innerHTML = '';
+                state.pairedFilesData = [];
+                state.selectedRows = new Set();
+                updateSelectionCount();
+
+                // Pair the files
+                const [paired, unpairedR1, unpairedR2] = pairFastqFiles(state.fastqFiles);
+
+                // Report pairing issues if any
+                const unpairMessages = [];
+
+                if (Object.keys(unpairedR1).length > 0) {
+                    const msg = "Unpaired R1 / Other files:\n" + 
+                        Object.entries(unpairedR1)
+                            .map(([file, reason]) => `- ${file} (${reason})`)
+                            .join('\n');
+                    unpairMessages.push(msg);
+                }
+
+                if (Object.keys(unpairedR2).length > 0) {
+                    const msg = "\nUnpaired R2 files:\n" + 
+                        Object.entries(unpairedR2)
+                            .map(([file, reason]) => `- ${file} (${reason})`)
+                            .join('\n');
+                    unpairMessages.push(msg);
+                }
+
+                if (unpairMessages.length > 0) {
+                    const fullMessage = unpairMessages.join('\n');
+                    showModal("Pairing Issues Found", `<pre class="whitespace-pre-wrap">${fullMessage}</pre>`);
+                }
+
+                if (paired.length === 0) {
+                    showMessage("No valid R1/R2 pairs were successfully formed.", 'info');
+                    tableBody.innerHTML = `
+                        <tr class="text-center">
+                            <td colspan="7" class="py-4 text-gray-500 dark:text-gray-400">No paired files found</td>
+                        </tr>
+                    `;
+                    return;
+                }
+
+                // Initialize default values
+                const defaultScore = document.getElementById('score-entry').value.trim() || "60";
+                const defaultWindow = document.getElementById('window-entry').value.trim() || "30";
+                const initialAmpliconSeq = "";
+                const initialGuideSeq = "";
+
+                // Populate table with paired files
+                paired.forEach((pair, index) => {
+                    const baseName = pair.name;
+                    const r1Name = pair.r1.name;
+                    const r2Name = pair.r2.name;
+
+                    // Create row in the table
+                    const row = document.createElement('tr');
+                    row.className = "hover:bg-gray-100 dark:hover:bg-gray-700";
+                    row.dataset.index = index;
+                    row.innerHTML = `
+                        <td class="px-4 py-2 whitespace-nowrap">${baseName}</td>
+                        <td class="px-4 py-2 file-cell" title="${r1Name}">${r1Name}</td>
+                        <td class="px-4 py-2 file-cell" title="${r2Name}">${r2Name}</td>
+                        <td class="px-4 py-2 sequence-cell" title="${initialAmpliconSeq}">${initialAmpliconSeq}</td>
+                        <td class="px-4 py-2 sequence-cell" title="${initialGuideSeq}">${initialGuideSeq}</td>
+                        <td class="px-4 py-2 text-center">${defaultScore}</td>
+                        <td class="px-4 py-2 text-center">${defaultWindow}</td>
+                    `;
+
+                    // Add row click handler for selection
+                    row.addEventListener('click', (e) => {
+                        toggleRowSelection(row, index);
+                    });
+
+                    tableBody.appendChild(row);
+
+                    // Store detailed data
+                    state.pairedFilesData.push({
+                        index,
+                        name: baseName,
+                        fastq_r1_full: pair.r1,
+                        fastq_r2_full: pair.r2,
+                        fastq_r1_display: r1Name,
+                        fastq_r2_display: r2Name,
+                        amplicon_seq: initialAmpliconSeq,
+                        guide_seq: initialGuideSeq,
+                        default_min_aln_score: defaultScore,
+                        plot_window_size: defaultWindow
+                    });
+                });
+
+                showMessage(`Successfully paired ${paired.length} FASTQ file sets.`, 'success');
+            } catch (error) {
+                console.error("Error processing FASTQ files:", error);
+                showMessage(`Error processing files: ${error.message}`, 'error');
+            } finally {
+                hideLoading();
+            }
+        }
+
+        function toggleRowSelection(row, index) {
+            if (state.selectedRows.has(index)) {
+                state.selectedRows.delete(index);
+                row.classList.remove('bg-primary/20');
+            } else {
+                state.selectedRows.add(index);
+                row.classList.add('bg-primary/20');
+            }
+
+            updateSelectionCount();
+        }
+
+        function updateSelectionCount() {
+            document.getElementById('selection-count').textContent = state.selectedRows.size;
+        }
+
+        function applySetting(columnKey) {
+            const tableRows = document.querySelectorAll('#table-body tr');
+            if (tableRows.length === 0) {
+                showMessage("Table is empty. Cannot apply settings.", 'info');
+                return;
+            }
+
+            const targetRows = state.selectedRows.size > 0 
+                ? Array.from(tableRows).filter(row => state.selectedRows.has(parseInt(row.dataset.index)))
+                : Array.from(tableRows);
+
+            if (targetRows.length === 0) {
+                showMessage("No rows selected to apply settings.", 'info');
+                return;
+            }
+
+            let valueToApply = "";
+            let error = null;
+
+            // Validate and get value based on column type
+            if (columnKey === 'amplicon_seq') {
+                const inputVal = document.getElementById('amplicon-combobox').value.trim();
+                if (!inputVal) {
+                    valueToApply = ""; // Clearing is allowed
+                } else {
+                    // Check if it's a name from the loaded list
+                    const isKnownName = state.ampliconLookup && state.ampliconNamesList.includes(inputVal);
+                    if (isKnownName) {
+                        [valueToApply, error] = getSequenceFromName(inputVal, state.ampliconLookup, "Amplicon");
+                    } 
+                    // If not a known name, check if it looks like a valid sequence
+                    else if (/^[ATCGN]+$/i.test(inputVal) && inputVal.length >= 16) {
+                        valueToApply = inputVal.toUpperCase();
+                    } else {
+                        error = `Input '${inputVal.length > 30 ? inputVal.substring(0, 30) + '...' : inputVal}' is not a known Amplicon name and not a valid sequence (ATCGN only, >=16 chars).`;
+                    }
+                }
+            } 
+            else if (columnKey === 'guide_seq') {
+                const inputVal = document.getElementById('guide-combobox').value.trim();
+                if (!inputVal) {
+                    valueToApply = ""; // Clearing is allowed
+                } else {
+                    // Check if it's a name from the loaded list
+                    const isKnownName = state.guideLookup && state.guideNamesList.includes(inputVal);
+                    if (isKnownName) {
+                        [valueToApply, error] = getSequenceFromName(inputVal, state.guideLookup, "Guide");
+                    } 
+                    // If not a known name, check if it looks like a valid sequence
+                    else if (/^[ATCGN]+$/i.test(inputVal) && inputVal.length >= 16) {
+                        valueToApply = inputVal.toUpperCase();
+                    } else {
+                        error = `Input '${inputVal.length > 30 ? inputVal.substring(0, 30) + '...' : inputVal}' is not a known Guide name and not a valid sequence (ATCGN only, >=16 chars).`;
+                    }
+                }
+            } 
+            else if (columnKey === 'default_min_aln_score') {
+                const inputVal = document.getElementById('score-entry').value.trim();
+                if (/^\d+$/.test(inputVal) && parseInt(inputVal) >= 0 && parseInt(inputVal) <= 100) {
+                    valueToApply = inputVal;
+                } else {
+                    error = "Min Score must be a whole number between 0 and 100.";
+                }
+            } 
+            else if (columnKey === 'plot_window_size') {
+                const inputVal = document.getElementById('window-entry').value.trim();
+                if (/^\d+$/.test(inputVal) && parseInt(inputVal) >= 0) {
+                    valueToApply = inputVal;
+                } else {
+                    error = "Window Size must be a non-negative whole number.";
+                }
+            }
+
+            if (error) {
+                showMessage(error, 'error');
+                return;
+            }
+
+            // Apply the value to selected rows
+            const columnMap = {
+                'amplicon_seq': 3,
+                'guide_seq': 4,
+                'default_min_aln_score': 5,
+                'plot_window_size': 6
+            };
+
+            const colIndex = columnMap[columnKey];
+
+            targetRows.forEach(row => {
+                const index = parseInt(row.dataset.index);
+                const cells = row.querySelectorAll('td');
+
+                // Update the cell in the table
+                cells[colIndex].textContent = valueToApply;
+                cells[colIndex].title = valueToApply;
+
+                // Update the internal data
+                if (state.pairedFilesData[index]) {
+                    state.pairedFilesData[index][columnKey] = valueToApply;
+                }
+            });
+
+            const targetDesc = state.selectedRows.size > 0 ? `${state.selectedRows.size} selected row(s)` : "all rows";
+            const valueDesc = valueToApply ? `'${valueToApply}'` : "'blank'";
+
+            showMessage(`Applied ${valueDesc} to ${columnKey} for ${targetRows.length} ${targetDesc}.`, 'success');
+        }
+
+        function clearColumn(columnKey, columnNameDisplay) {
+            if (state.selectedRows.size === 0) {
+                showMessage(`No rows selected to clear '${columnNameDisplay}'.`, 'info');
+                return;
+            }
+
+            if (!confirm(`Clear '${columnNameDisplay}' for the ${state.selectedRows.size} selected row(s)?`)) {
+                return;
+            }
+
+            const columnMap = {
+                'amplicon_seq': 3,
+                'guide_seq': 4
+            };
+
+            const colIndex = columnMap[columnKey];
+            const valueToApply = "";
+            let clearedCount = 0;
+
+            // Get rows to update
+            const tableRows = document.querySelectorAll('#table-body tr');
+            const targetRows = Array.from(tableRows).filter(row => state.selectedRows.has(parseInt(row.dataset.index)));
+
+            targetRows.forEach(row => {
+                const index = parseInt(row.dataset.index);
+                const cells = row.querySelectorAll('td');
+
+                if (cells[colIndex].textContent !== "") {
+                    // Update the cell in the table
+                    cells[colIndex].textContent = valueToApply;
+                    cells[colIndex].title = valueToApply;
+
+                    // Update the internal data
+                    if (state.pairedFilesData[index]) {
+                        state.pairedFilesData[index][columnKey] = valueToApply;
+                    }
+
+                    clearedCount++;
+                }
+            });
+
+            showMessage(`Cleared ${clearedCount} entries in '${columnNameDisplay}' for selected rows.`, 'success');
+        }
+
+        function deleteSelectedRows() {
+            if (state.selectedRows.size === 0) {
+                showMessage("No rows selected to delete.", 'info');
+                return;
+            }
+
+            if (!confirm(`Delete ${state.selectedRows.size} selected row(s)?`)) {
+                return;
+            }
+
+            // Create a sorted array (descending) of indices to remove
+            const indicesToRemove = Array.from(state.selectedRows).sort((a, b) => b - a);
+
+            // Remove from DOM (starting from highest index to avoid shifting issues)
+            const tableRows = Array.from(document.querySelectorAll('#table-body tr'));
+
+            indicesToRemove.forEach(index => {
+                const rowToRemove = tableRows.find(row => parseInt(row.dataset.index) === index);
+                if (rowToRemove) {
+                    rowToRemove.remove();
+                }
+            });
+
+            // Remove from data array (starting from highest index)
+            indicesToRemove.forEach(index => {
+                state.pairedFilesData.splice(index, 1);
+            });
+
+            // Reset selection
+            state.selectedRows.clear();
+            updateSelectionCount();
+
+            // Update remaining row indices
+            document.querySelectorAll('#table-body tr').forEach((row, newIndex) => {
+                row.dataset.index = newIndex;
+            });
+
+            // Update internal data indices
+            state.pairedFilesData.forEach((data, newIndex) => {
+                data.index = newIndex;
+            });
+
+            showMessage(`Deleted ${indicesToRemove.length} rows.`, 'success');
+
+            // If table is now empty, show message
+            if (state.pairedFilesData.length === 0) {
+                document.getElementById('table-body').innerHTML = `
+                    <tr class="text-center">
+                        <td colspan="7" class="py-4 text-gray-500 dark:text-gray-400">No data available</td>
+                    </tr>
+                `;
+            }
+        }
+
+        function saveTabDelimited() {
+            if (state.pairedFilesData.length === 0) {
+                showMessage("No data to save.", 'warning');
+                return;
+            }
+
+            showModal(
+                "Save Location Advice",
+                "Please save this batch file in the same folder as your FASTQ files, or ensure FASTQ paths are correct relative to where you run CRISPresso.",
+                generateTSVFile
+            );
+        }
+
+        function generateTSVFile() {
+            const header = ["name", "fastq_r1", "fastq_r2", "amplicon_seq", "guide_seq", "default_min_aln_score", "plot_window_size"];
+            let content = header.join('\t') + '\n';
+
+            let paddedCount = 0;
+            let skippedPaddingCount = 0;
+            const paddingWarnings = [];
+
+            // Process each row
+            state.pairedFilesData.forEach(data => {
+                const rowValues = [
+                    data.name,
+                    data.fastq_r1_display,
+                    data.fastq_r2_display,
+                    data.amplicon_seq,
+                    data.guide_seq,
+                    data.default_min_aln_score,
+                    data.plot_window_size
+                ];
+
+                // Padding logic
+                const ampliconSeq = String(data.amplicon_seq);
+                const guideSeq = String(data.guide_seq);
+                const windowSizeStr = String(data.plot_window_size);
+                let paddedAmplicon = ampliconSeq; // Default to original
+                let needsPadding = false;
+
+                if (ampliconSeq && guideSeq && /^\d+$/.test(windowSizeStr)) {
+                    const plotWindowSize = parseInt(windowSizeStr);
+                    if (plotWindowSize > 0) {
+                        const startIndex = findGuideInAmplicon(ampliconSeq, guideSeq);
+
+                        if (startIndex !== null) {
+                            const guideLen = guideSeq.length;
+                            const ampliconLen = ampliconSeq.length;
+
+                            // Calculate distances
+                            const leftDistance = startIndex;
+                            const rightDistance = ampliconLen - (startIndex + guideLen);
+
+                            const leftPaddingNeeded = Math.max(0, plotWindowSize - leftDistance);
+                            const rightPaddingNeeded = Math.max(0, plotWindowSize - rightDistance);
+
+                            if (leftPaddingNeeded > 0 || rightPaddingNeeded > 0) {
+                                paddedAmplicon = 'N'.repeat(leftPaddingNeeded) + ampliconSeq + 'N'.repeat(rightPaddingNeeded);
+                                rowValues[3] = paddedAmplicon; // Update the amplicon in the row values
+                                paddedCount++;
+                                needsPadding = true;
+                                console.log(`Row '${data.name}': Padded amplicon (L:${leftPaddingNeeded}, R:${rightPaddingNeeded}). New length: ${paddedAmplicon.length}`);
+                            }
+                        } else {
+                            // Guide not found in amplicon
+                            skippedPaddingCount++;
+                            const warnMsg = `Row '${data.name}': Skipped padding (Guide not found in Amplicon).`;
+                            paddingWarnings.push(warnMsg);
+                            console.log(warnMsg);
+                        }
+                    }
+                } else if (parseInt(windowSizeStr) > 0) {
+                    // Missing data for padding
+                    skippedPaddingCount++;
+                    let reason = "";
+                    if (!ampliconSeq) reason = "Missing Amplicon";
+                    else if (!guideSeq) reason = "Missing Guide";
+                    else reason = "Invalid Window Size";
+
+                    const warnMsg = `Row '${data.name}': Skipped padding (${reason}).`;
+                    paddingWarnings.push(warnMsg);
+                    console.log(warnMsg);
+                }
+
+                // Add the row to content
+                content += rowValues.join('\t') + '\n';
+            });
+
+            // Create file and trigger download
+            const blob = new Blob([content], { type: 'text/tab-separated-values' });
+            const url = URL.createObjectURL(blob);
+            const filename = "batch.txt";
+
+            // Store the content and filename for command generation
+            state.lastSavedContent = content;
+            state.lastSavedFilename = filename;
+
+            // Create a download link
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+
+            // Show success message with padding details
+            let successMessage = "Batch file generated and download started.";
+            if (paddedCount > 0) {
+                successMessage += `\n\nApplied padding to ${paddedCount} amplicon sequence(s).`;
+            }
+            if (skippedPaddingCount > 0) {
+                successMessage += `\nSkipped padding for ${skippedPaddingCount} row(s).`;
+
+                // Add detailed warnings if there are any
+                if (paddingWarnings.length > 0) {
+                    successMessage += "\n\nPadding Warnings:";
+                    paddingWarnings.forEach(warning => {
+                        successMessage += `\n- ${warning}`;
+                    });
+                }
+            }
+
+            showMessage(successMessage, 'success');
+        }
+
+        function copyCommand() {
+            if (!state.lastSavedFilename) {
+                showMessage("Please save the batch file first using 'Create Tab Delimited File'.", 'warning');
+                return;
+            }
+
+            const filename = state.lastSavedFilename;
+
+            // Basic command structure
+            const command = `docker run --rm -v "/path/to/your/data":/DATA -w /DATA -i pinellolab/crispresso2 CRISPRessoBatch --batch_settings "${filename}" --output_folder output --skip_failed`;
+
+            // Create a textarea to copy the command
+            const textarea = document.createElement('textarea');
+            textarea.value = command;
+            document.body.appendChild(textarea);
+            textarea.select();
+
+            try {
+                document.execCommand('copy');
+                showMessage("Command copied to clipboard. Note: You need to replace \"/path/to/your/data\" with your actual data directory path.", 'success');
+            } catch (err) {
+                showMessage("Failed to copy command. Please copy manually: " + command, 'error');
+            } finally {
+                document.body.removeChild(textarea);
+            }
+        }
+
+        // --- Initialize Event Listeners ---
+        document.addEventListener('DOMContentLoaded', () => {
+            // File selection handlers
+            document.getElementById('fastq-files').addEventListener('change', handleFastqSelection);
+            document.getElementById('amplicon-excel').addEventListener('change', (e) => handleExcelSelection(e, 'amplicon'));
+            document.getElementById('guide-excel').addEventListener('change', (e) => handleExcelSelection(e, 'guide'));
+
+            // Process button
+            document.getElementById('process-btn').addEventListener('click', processFastqFiles);
+
+            // Settings application
+            document.getElementById('apply-amplicon-btn').addEventListener('click', () => applySetting('amplicon_seq'));
+            document.getElementById('clear-amplicon-btn').addEventListener('click', () => clearColumn('amplicon_seq', 'Amplicon Seq'));
+            document.getElementById('apply-guide-btn').addEventListener('click', () => applySetting('guide_seq'));
+            document.getElementById('clear-guide-btn').addEventListener('click', () => clearColumn('guide_seq', 'Guide Seq'));
+            document.getElementById('apply-score-btn').addEventListener('click', () => applySetting('default_min_aln_score'));
+            document.getElementById('apply-window-btn').addEventListener('click', () => applySetting('plot_window_size'));
+
+            // Action buttons
+            document.getElementById('delete-rows-btn').addEventListener('click', deleteSelectedRows);
+            document.getElementById('save-tsv-btn').addEventListener('click', saveTabDelimited);
+            document.getElementById('copy-command-btn').addEventListener('click', copyCommand);
+        });
+    </script>
+</body>
+</html>
